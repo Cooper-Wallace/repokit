@@ -24,6 +24,7 @@ gh_standardise = importlib.util.module_from_spec(spec)
 loader.exec_module(gh_standardise)
 
 PATTERN = gh_standardise.COMMIT_PATTERN
+BIN_CMD = [sys.executable, str(REPO_ROOT / "bin" / "gh-standardise")]
 
 
 class TestConventionalCommits(unittest.TestCase):
@@ -67,7 +68,7 @@ class TestConventionalCommits(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             p = Path(tmpdir)
             subprocess.run(["git", "init", "-b", "main"], cwd=p, check=True, capture_output=True)
-            subprocess.run(["gh-standardise", "hook", "install"], cwd=p, check=True, capture_output=True)
+            subprocess.run([*BIN_CMD, "hook", "install"], cwd=p, check=True, capture_output=True)
 
             hook = p / ".git" / "hooks" / "commit-msg"
             self.assertTrue(hook.exists())
@@ -178,7 +179,7 @@ class TestArchetypeTemplates(unittest.TestCase):
 
 class TestCLICommands(unittest.TestCase):
     def test_help_command(self):
-        res = subprocess.run(["gh-standardise", "--help"], capture_output=True, text=True)
+        res = subprocess.run([*BIN_CMD, "--help"], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0)
         self.assertIn("gh-standardise", res.stdout)
         self.assertIn("create", res.stdout)
@@ -187,7 +188,7 @@ class TestCLICommands(unittest.TestCase):
         self.assertIn("templates", res.stdout)
 
     def test_templates_command(self):
-        res = subprocess.run(["gh-standardise", "templates"], capture_output=True, text=True)
+        res = subprocess.run([*BIN_CMD, "templates"], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0)
         self.assertIn("python", res.stdout)
         self.assertIn("java", res.stdout)
