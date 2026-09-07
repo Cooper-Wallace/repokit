@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# {{repo_name}}: {{description}}
+set -euo pipefail
+
+# ANSI color codes
+GREEN="\033[1;32m"
+RED="\033[1;31m"
+BLUE="\033[1;34m"
+RESET="\033[0m"
+
+log_info() {
+    echo -e "${BLUE}[INFO]${RESET} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${RESET} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${RESET} $1" >&2
+}
+
+show_help() {
+    cat << EOF
+Usage: {{repo_name}} [options] [command]
+
+{{description}}
+
+Commands:
+  run          Execute main operation
+  version      Display version information
+  help         Display this help message
+
+Options:
+  -h, --help   Show help information
+  -v, --version Show version
+
+EOF
+}
+
+COMMAND="${1:-run}"
+
+case "$COMMAND" in
+    run)
+        log_info "Running {{repo_name}}..."
+        log_success "Completed successfully."
+        ;;
+    version|-v|--version)
+        echo "{{repo_name}} version 0.1.0"
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    *)
+        log_error "Unknown command: $COMMAND"
+        show_help
+        exit 1
+        ;;
+esac

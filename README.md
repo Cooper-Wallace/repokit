@@ -102,20 +102,40 @@ gh-standardise configure
 
 ---
 
-### 3. Create a Brand New Standardised Repository
-Create a new repository on GitHub, clone/initialise it locally, set up the initial commit, push to `main`, and apply branch protection:
+### 3. Solution Archetypes & Scaffolding
+List available project structure archetypes:
+```bash
+gh-standardise templates
+```
+
+Supported archetypes:
+- **`python`**: Modern `src` layout, `pyproject.toml` (ruff + pytest), typing marker, and test suite.
+- **`java`**: Maven layered architecture (`controller`, `service`, `model`), `application.yml`, and JUnit 5 tests.
+- **`typescript`**: Vite + strict TypeScript app, modular components, and Vitest.
+- **`bash`**: Standalone CLI utility (`bin/` script, `install.sh`, and automated smoke tests).
+
+---
+
+### 4. Create a Brand New Standardised Repository
+Create a new repository on GitHub, scaffold the selected solution archetype, set up initial commit, push to `main`, and apply branch protection:
 
 ```bash
-# Create a private repository (default)
-gh-standardise create my-robotics-pkg -d "ROS 2 navigation and perception node"
+# Create a Python package
+gh-standardise create my-python-pkg --type python --public -d "Modern Python data processing package"
 
-# Create a public portfolio repository
-gh-standardise create pointcloud-filter --public -d "High-performance pointcloud downsampler"
+# Create a Java REST API
+gh-standardise create auth-service --type java --public -d "Spring Boot authentication service"
+
+# Create a TypeScript frontend
+gh-standardise create dashboard-ui --type typescript --public -d "Real-time metrics frontend"
+
+# Create a standalone Bash CLI utility
+gh-standardise create sys-monitor --type bash --public -d "System health monitor CLI"
 ```
 
 ---
 
-### 4. Install Git Commit Hook Only
+### 5. Install Git Commit Hook Only
 To quickly install or repair the Conventional Commits hook on any local git repository:
 ```bash
 gh-standardise hook install
