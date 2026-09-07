@@ -1,0 +1,597 @@
+#!/usr/bin/env python3
+"""
+gh-standardise: Automate GitHub repository DevOps and Git hygiene standards.
+
+Features:
+- Enforce clean GitHub merge strategies (Squash & Merge only, PR_TITLE, PR_BODY, delete branch on merge)
+- Enforce branch protection / Rulesets on default branch (no direct pushes, require PR, prevent force push & deletion)
+- Install local Conventional Commits hook (.git/hooks/commit-msg)
+- Scaffold GitHub PR template (.github/pull_request_template.md)
+- Scaffold Semantic PR GitHub Actions workflow (.github/workflows/semantic-pr.yml)
+- Audit existing repositories against standards
+- Create new portfolio-ready repositories with all standards pre-configured
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+# Colors for terminal output
+GREEN = "\033[1;32m"
+RED = "\033[1;31m"
+YELLOW = "\033[1;33m"
+BLUE = "\033[1;34m"
+CYAN = "\033[1;36m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+COMMIT_MSG_HOOK = r'''#!/usr/bin/env bash
+# Git commit-msg hook enforcing Conventional Commits
+# (https://www.conventionalcommits.org/)
+
+set -e
+
+COMMIT_MSG_FILE="$1"
+COMMIT_MSG=$(head -n 1 "$COMMIT_MSG_FILE")
+
+# Allow merge commits, squashes, and fixups
+if echo "$COMMIT_MSG" | grep -Eq "^(Merge|fixup!|squash!)"; then
+    exit 0
+fi
+
+# Conventional Commits regex: type(optional-scope)!: description
+PATTERN="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_.-]+\))?!?: .+$"
+
+if ! echo "$COMMIT_MSG" | grep -Eq "$PATTERN"; then
+    echo -e "\033[1;31m[ERROR] Commit rejected: Message does not follow Conventional Commits.\033[0m"
+    echo -e "\033[1;33mExpected:\033[0m <type>(<scope optional>): <description>"
+    echo -e "\033[1;33mAllowed Types:\033[0m feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+    echo -e "\033[1;33mExamples:\033[0m"
+    echo "  feat(laser): add pointcloud downsampling"
+    echo "  fix(launch): correct topic remapping in simulation"
+    echo "  docs(readme): add setup and launch instructions"
+    echo -e "\033[1;31mYour input:\033[0m \"$COMMIT_MSG\""
+    exit 1
+fi
+'''
+
+PR_TEMPLATE = """## Summary
+<!-- Provide a clear, concise summary of the problem and proposed solution. -->
+
+## Type of Change
+<!-- Please check the item that best describes this change: -->
+- [ ] `feat`: New feature or capability
+- [ ] `fix`: Bug fix
+- [ ] `refactor`: Code refactor (no behavioral changes)
+- [ ] `perf`: Performance improvement
+- [ ] `docs`: Documentation changes
+- [ ] `test`: New or updated tests
+- [ ] `ci`: CI/CD pipeline or build configuration
+- [ ] `chore`: Maintenance, dependencies, or tooling
+
+## Key Changes
+<!-- Bullet points detailing the specific changes made. -->
+- 
+
+## Verification & Testing
+<!-- Detail the testing performed to verify this change. -->
+- [ ] Automated tests pass (`pytest`, `colcon test`, etc.)
+- [ ] Code formatting & linting checks pass
+- [ ] Manual test / simulation verification (include details/logs below)
+
+**Test Details:**
+<!-- e.g. ROS 2 bag played, Gazebo launch verified, hardware test results -->
+
+## Pre-Merge Checklist
+- [ ] PR title follows [Conventional Commits](https://www.conventionalcommits.org/) (e.g. `feat(nav): add laser filter`)
+- [ ] Branch is rebased/up-to-date with `main`
+- [ ] No temporary debug code or commented-out blocks left in diff
+"""
+
+WORKFLOW_SEMANTIC_PR = """name: "Semantic PR Title Check"
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+
+permissions:
+  pull-requests: read
+
+jobs:
+  main:
+    name: Validate Conventional Commit PR Title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+          requireScope: false
+"""
+
+DEFAULT_GITIGNORE = """# OS Artifacts
+.DS_Store
+*~
+*.swp
+
+# Build artifacts & caches
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+install/
+log/
+dist/
+*.egg-info/
+.pytest_cache/
+
+# Environment
+.venv/
+env/
+venv/
+.env
+
+# IDEs
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+"""
+
+DEFAULT_README = """# {repo_name}
+
+{description}
+
+---
+
+## Overview
+<!-- Provide a high-level overview of this project. -->
+
+## Architecture & Design
+<!-- Explain architectural choices, key components, or system design. -->
+
+## Getting Started
+
+### Prerequisites
+<!-- List prerequisites, tools, or dependencies. -->
+
+### Installation & Run
+```bash
+# Clone the repository
+git clone https://github.com/{repo_slug}.git
+cd {repo_name}
+```
+
+## Development & Contribution Flow
+This project adheres to professional DevOps standards:
+- **Conventional Commits**: Commits and PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/).
+- **Short-lived Feature Branches**: All changes are made via `feat/*` or `fix/*` branches and submitted as Pull Requests.
+- **Squash Merges**: Pull requests are verified via CI and squashed into atomic entries on `main`.
+"""
+
+
+def log_info(msg: str):
+    print(f"{BLUE}[INFO]{RESET} {msg}")
+
+
+def log_success(msg: str):
+    print(f"{GREEN}[SUCCESS]{RESET} {msg}")
+
+
+def log_warn(msg: str):
+    print(f"{YELLOW}[WARN]{RESET} {msg}")
+
+
+def log_error(msg: str):
+    print(f"{RED}[ERROR]{RESET} {msg}")
+
+
+def run_cmd(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=check,
+        )
+    except subprocess.CalledProcessError as e:
+        return e
+
+
+def get_git_repo_root(path: Path | None = None) -> Path | None:
+    p = path or Path.cwd()
+    res = run_cmd(["git", "-C", str(p), "rev-parse", "--show-toplevel"], check=False)
+    if res.returncode == 0 and res.stdout.strip():
+        return Path(res.stdout.strip())
+    return None
+
+
+def get_repo_slug(repo_root: Path) -> str | None:
+    res = run_cmd(["git", "-C", str(repo_root), "remote", "get-url", "origin"], check=False)
+    if res.returncode != 0 or not res.stdout.strip():
+        return None
+    url = res.stdout.strip()
+    m = re.search(r"github\.com[:/]([^/]+)/([^/\.]+?)(?:\.git)?$", url)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    return None
+
+
+def get_github_user() -> str | None:
+    res = run_cmd(["gh", "api", "user", "--jq", ".login"], check=False)
+    if res.returncode == 0 and res.stdout.strip():
+        return res.stdout.strip()
+    return None
+
+
+def apply_github_repo_settings(repo_slug: str) -> bool:
+    log_info(f"Applying GitHub merge and branch cleanup settings to {repo_slug}...")
+    payload = {
+        "allow_squash_merge": True,
+        "allow_merge_commit": False,
+        "allow_rebase_merge": False,
+        "delete_branch_on_merge": True,
+        "allow_update_branch": True,
+        "squash_merge_commit_title": "PR_TITLE",
+        "squash_merge_commit_message": "PR_BODY",
+    }
+    p = subprocess.run(
+        ["gh", "api", "--method", "PATCH", f"repos/{repo_slug}", "--input", "-"],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+    )
+    if p.returncode == 0:
+        log_success("GitHub repository settings updated (Squash only, PR_TITLE, auto-delete branches).")
+        return True
+    else:
+        log_warn(f"Failed to update some repository settings via GitHub API: {p.stderr.strip()}")
+        return False
+
+
+def apply_branch_ruleset(repo_slug: str, default_branch: str = "~DEFAULT_BRANCH") -> bool:
+    log_info(f"Configuring default branch protection ruleset on {repo_slug}...")
+    # Check if a ruleset named 'default-branch-protection' already exists
+    p = subprocess.run(
+        ["gh", "api", f"repos/{repo_slug}/rulesets"],
+        capture_output=True,
+        text=True,
+    )
+    existing_id = None
+    if p.returncode == 0:
+        try:
+            rulesets = json.loads(p.stdout)
+            for r in rulesets:
+                if r.get("name") == "default-branch-protection":
+                    existing_id = r.get("id")
+                    break
+        except Exception:
+            pass
+
+    payload = {
+        "name": "default-branch-protection",
+        "target": "branch",
+        "enforcement": "active",
+        "conditions": {
+            "ref_name": {
+                "include": [default_branch],
+                "exclude": [],
+            }
+        },
+        "rules": [
+            {"type": "deletion"},
+            {"type": "non_fast_forward"},
+            {
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 0,
+                    "dismiss_stale_reviews_on_push": False,
+                    "require_code_owner_review": False,
+                    "require_last_push_approval": False,
+                    "required_review_thread_resolution": False,
+                },
+            },
+        ],
+    }
+
+    if existing_id:
+        log_info(f"Updating existing ruleset (ID: {existing_id})...")
+        p_rule = subprocess.run(
+            ["gh", "api", "--method", "PUT", f"repos/{repo_slug}/rulesets/{existing_id}", "--input", "-"],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+        )
+    else:
+        log_info("Creating new default branch protection ruleset...")
+        p_rule = subprocess.run(
+            ["gh", "api", "--method", "POST", f"repos/{repo_slug}/rulesets", "--input", "-"],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+        )
+
+    if p_rule.returncode == 0:
+        log_success("Branch protection ruleset active (blocks direct pushes/force pushes, allows solo PR merge).")
+        return True
+    else:
+        log_warn(f"Note on ruleset: {p_rule.stderr.strip() or p_rule.stdout.strip()}")
+        log_info("If using a private repo on GitHub Free, rulesets or classic branch protection may require public visibility.")
+        return False
+
+
+def install_commit_hook(repo_root: Path) -> bool:
+    hook_path = repo_root / ".git" / "hooks" / "commit-msg"
+    try:
+        hook_path.parent.mkdir(parents=True, exist_ok=True)
+        hook_path.write_text(COMMIT_MSG_HOOK)
+        hook_path.chmod(0o755)
+        log_success(f"Installed Conventional Commits hook: {hook_path.relative_to(repo_root)}")
+        return True
+    except Exception as e:
+        log_error(f"Failed to install git hook: {e}")
+        return False
+
+
+def scaffold_templates(repo_root: Path, force: bool = False) -> None:
+    # 1. PR Template
+    pr_template_path = repo_root / ".github" / "pull_request_template.md"
+    if not pr_template_path.exists() or force:
+        pr_template_path.parent.mkdir(parents=True, exist_ok=True)
+        pr_template_path.write_text(PR_TEMPLATE)
+        log_success("Scaffolded .github/pull_request_template.md")
+    else:
+        log_info("PR template already exists (use --force to overwrite).")
+
+    # 2. Semantic PR Workflow
+    workflow_path = repo_root / ".github" / "workflows" / "semantic-pr.yml"
+    if not workflow_path.exists() or force:
+        workflow_path.parent.mkdir(parents=True, exist_ok=True)
+        workflow_path.write_text(WORKFLOW_SEMANTIC_PR)
+        log_success("Scaffolded .github/workflows/semantic-pr.yml")
+    else:
+        log_info("Semantic PR workflow already exists (use --force to overwrite).")
+
+
+def audit_repository(repo_root: Path):
+    print(f"\n{BOLD}Auditing Repository Standards:{RESET} {repo_root}\n")
+
+    # Git root check
+    slug = get_repo_slug(repo_root)
+    if not slug:
+        log_error("No GitHub remote origin found for this repository.")
+        return
+
+    print(f"{CYAN}GitHub Repository:{RESET} {slug}\n")
+
+    # Check local hook
+    hook_path = repo_root / ".git" / "hooks" / "commit-msg"
+    has_hook = hook_path.exists() and os.access(hook_path, os.X_OK)
+
+    # Check templates
+    has_pr_template = (repo_root / ".github" / "pull_request_template.md").exists()
+    has_workflow = (repo_root / ".github" / "workflows" / "semantic-pr.yml").exists()
+
+    # Query GitHub API for settings
+    p = run_cmd(["gh", "api", f"repos/{slug}"], check=False)
+    gh_data = json.loads(p.stdout) if p.returncode == 0 else {}
+
+    squash_enabled = gh_data.get("allow_squash_merge") is True
+    merge_commit_disabled = gh_data.get("allow_merge_commit") is False
+    rebase_disabled = gh_data.get("allow_rebase_merge") is False
+    delete_branch = gh_data.get("delete_branch_on_merge") is True
+    title_is_pr = gh_data.get("squash_merge_commit_title") == "PR_TITLE"
+    msg_is_pr = gh_data.get("squash_merge_commit_message") in ("PR_BODY", "BLANK")
+
+    # Query Rulesets
+    p_rules = run_cmd(["gh", "api", f"repos/{slug}/rulesets"], check=False)
+    has_ruleset = False
+    if p_rules.returncode == 0:
+        try:
+            rulesets = json.loads(p_rules.stdout)
+            has_ruleset = any(r.get("name") == "default-branch-protection" and r.get("enforcement") == "active" for r in rulesets)
+        except Exception:
+            pass
+
+    # Display audit results
+    items = [
+        ("Squash & Merge Enabled", squash_enabled),
+        ("Merge Commits Disabled", merge_commit_disabled),
+        ("Rebase Commits Disabled", rebase_disabled),
+        ("Auto-Delete Head Branches on Merge", delete_branch),
+        ("Squash Commit Title set to PR_TITLE", title_is_pr),
+        ("Squash Commit Message set to PR_BODY", msg_is_pr),
+        ("Default Branch Protection Ruleset Active", has_ruleset),
+        ("Local Conventional Commit Hook Installed", has_hook),
+        ("Pull Request Template (.github/pull_request_template.md)", has_pr_template),
+        ("Semantic PR CI Workflow (.github/workflows/semantic-pr.yml)", has_workflow),
+    ]
+
+    all_passed = True
+    for label, passed in items:
+        if passed:
+            print(f"  {GREEN}✔{RESET} {label}")
+        else:
+            print(f"  {RED}✘{RESET} {label}")
+            all_passed = False
+
+    print()
+    if all_passed:
+        log_success("All repository standards are strictly satisfied!")
+    else:
+        log_warn("Some standards are missing. Run `gh-standardise configure` to automatically apply them.")
+
+
+def configure_repository(target: str | None, force: bool = False):
+    repo_root = get_git_repo_root(Path(target) if target else None)
+    if not repo_root:
+        log_error(f"Target '{target or '.'}' is not inside a git repository.")
+        sys.exit(1)
+
+    slug = get_repo_slug(repo_root)
+    if not slug:
+        log_error("Could not find GitHub remote origin URL for this repository.")
+        sys.exit(1)
+
+    print(f"{BOLD}Configuring Repository:{RESET} {slug} ({repo_root})\n")
+
+    # 1. Update GitHub Settings
+    apply_github_repo_settings(slug)
+
+    # 2. Apply Ruleset
+    apply_branch_ruleset(slug)
+
+    # 3. Install commit-msg hook
+    install_commit_hook(repo_root)
+
+    # 4. Scaffold PR template and semantic-pr workflow
+    scaffold_templates(repo_root, force=force)
+
+    print()
+    log_success("Repository configuration complete!")
+
+
+def create_repository(
+    name: str,
+    description: str = "",
+    public: bool = False,
+    target_dir: str | None = None,
+):
+    user = get_github_user()
+    if not user:
+        log_error("Not authenticated with GitHub CLI. Please run `gh auth login` first.")
+        sys.exit(1)
+
+    slug = f"{user}/{name}"
+    visibility = "--public" if public else "--private"
+    path = Path(target_dir).resolve() if target_dir else Path.cwd() / name
+
+    if path.exists() and any(path.iterdir()):
+        log_error(f"Target directory {path} already exists and is not empty.")
+        sys.exit(1)
+
+    path.mkdir(parents=True, exist_ok=True)
+
+    log_info(f"Creating new GitHub repository {slug} ({'public' if public else 'private'})...")
+    create_args = ["gh", "repo", "create", slug, visibility]
+    if description:
+        create_args.extend(["--description", description])
+
+    res = run_cmd(create_args)
+    if res.returncode != 0:
+        log_error(f"Failed to create repo via gh: {res.stderr.strip()}")
+        sys.exit(1)
+
+    log_success(f"GitHub repository created: https://github.com/{slug}")
+
+    # Initialize local git
+    log_info(f"Initialising local repository at {path}...")
+    run_cmd(["git", "init", "-b", "main"], cwd=path)
+    run_cmd(["git", "remote", "add", "origin", f"https://github.com/{slug}.git"], cwd=path)
+
+    # Scaffold templates
+    readme_content = DEFAULT_README.format(repo_name=name, description=description or "A modern robotics / software engineering project.", repo_slug=slug)
+    (path / "README.md").write_text(readme_content)
+    (path / ".gitignore").write_text(DEFAULT_GITIGNORE)
+    scaffold_templates(path, force=True)
+    install_commit_hook(path)
+
+    # Initial commit
+    run_cmd(["git", "add", "."], cwd=path)
+    run_cmd(["git", "commit", "-m", "chore: initial repository scaffolding"], cwd=path)
+
+    # Push to origin main
+    log_info("Pushing initial commit to main...")
+    push_res = run_cmd(["git", "push", "-u", "origin", "main"], cwd=path)
+    if push_res.returncode != 0:
+        log_warn(f"Initial push: {push_res.stderr.strip()}")
+
+    # Apply GitHub Settings & Rulesets
+    apply_github_repo_settings(slug)
+    apply_branch_ruleset(slug)
+
+    print()
+    log_success(f"New repository {slug} initialised and fully standardised!")
+    print(f"\n{CYAN}Next Steps:{RESET}")
+    print(f"  cd {path}")
+    print("  git checkout -b feat/initial-setup\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="gh-standardise",
+        description="Automate GitHub repository DevOps and Git hygiene standards.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # create
+    create_parser = subparsers.add_parser("create", help="Create a new standardised GitHub repo")
+    create_parser.add_argument("name", help="Repository name")
+    create_parser.add_argument("-d", "--description", default="", help="Repository description")
+    create_parser.add_argument("--public", action="store_true", help="Create as public repository (default: private)")
+    create_parser.add_argument("--path", help="Local directory path (default: ./{name})")
+
+    # configure
+    config_parser = subparsers.add_parser("configure", help="Apply standards to an existing repository")
+    config_parser.add_argument("path", nargs="?", default=None, help="Path to repo directory (default: current directory)")
+    config_parser.add_argument("-f", "--force", action="store_true", help="Overwrite existing templates")
+
+    # audit
+    audit_parser = subparsers.add_parser("audit", help="Audit repository compliance against standards")
+    audit_parser.add_argument("path", nargs="?", default=None, help="Path to repo directory (default: current directory)")
+
+    # hook
+    hook_parser = subparsers.add_parser("hook", help="Git hooks management")
+    hook_sub = hook_parser.add_subparsers(dest="hook_command", required=True)
+    hook_install = hook_sub.add_parser("install", help="Install Conventional Commits commit-msg hook")
+    hook_install.add_argument("path", nargs="?", default=None, help="Path to repo directory (default: current directory)")
+
+    args = parser.parse_args()
+
+    if args.command == "create":
+        create_repository(
+            name=args.name,
+            description=args.description,
+            public=args.public,
+            target_dir=args.path,
+        )
+    elif args.command == "configure":
+        configure_repository(args.path, force=args.force)
+    elif args.command == "audit":
+        repo_root = get_git_repo_root(Path(args.path) if args.path else None)
+        if not repo_root:
+            log_error("Not inside a git repository.")
+            sys.exit(1)
+        audit_repository(repo_root)
+    elif args.command == "hook" and args.hook_command == "install":
+        repo_root = get_git_repo_root(Path(args.path) if args.path else None)
+        if not repo_root:
+            log_error("Not inside a git repository.")
+            sys.exit(1)
+        install_commit_hook(repo_root)
+
+
+if __name__ == "__main__":
+    main()

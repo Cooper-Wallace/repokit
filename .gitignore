@@ -1,0 +1,25 @@
+# OS Artifacts
+.DS_Store
+*~
+*.swp
+
+# Python caches & build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+
+# Virtual environments
+.venv/
+env/
+venv/
+.env
+
+# IDE configuration
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
