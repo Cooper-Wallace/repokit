@@ -1,0 +1,9 @@
+# OS artifacts
+.DS_Store
+*~
+*.swp
+
+# Editor config
+.vscode/*
+!.vscode/settings.json
+.idea/

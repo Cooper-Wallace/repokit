@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gh-standardise: Automate GitHub repository DevOps and Git hygiene standards.
+gh-standardise: Automate GitHub repository DevOps, Git hygiene, and archetype standards.
 
 Features:
 - Enforce clean GitHub merge strategies (Squash & Merge only, PR_TITLE, PR_BODY, delete branch on merge)
@@ -8,7 +8,8 @@ Features:
 - Install local Conventional Commits hook (.git/hooks/commit-msg)
 - Scaffold GitHub PR template (.github/pull_request_template.md)
 - Scaffold Semantic PR GitHub Actions workflow (.github/workflows/semantic-pr.yml)
-- Audit existing repositories against standards
+- Scaffold industry-standard solution archetypes (Python, Java, TypeScript, Bash)
+- Audit existing repositories against DevOps and structural archetype standards
 - Create new portfolio-ready repositories with all standards pre-configured
 """
 
@@ -28,6 +29,10 @@ BLUE = "\033[1;34m"
 CYAN = "\033[1;36m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
+
+TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+
+COMMIT_PATTERN = r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_.-]+\))?!?: .+$"
 
 COMMIT_MSG_HOOK = r'''#!/usr/bin/env bash
 # Git commit-msg hook enforcing Conventional Commits
@@ -79,12 +84,12 @@ PR_TEMPLATE = """## Summary
 
 ## Verification & Testing
 <!-- Detail the testing performed to verify this change. -->
-- [ ] Automated tests pass (`pytest`, `colcon test`, etc.)
+- [ ] Automated tests pass (`pytest`, `mvn test`, `npm test`, etc.)
 - [ ] Code formatting & linting checks pass
 - [ ] Manual test / simulation verification (include details/logs below)
 
 **Test Details:**
-<!-- e.g. ROS 2 bag played, Gazebo launch verified, hardware test results -->
+<!-- Details or output from testing -->
 
 ## Pre-Merge Checklist
 - [ ] PR title follows [Conventional Commits](https://www.conventionalcommits.org/) (e.g. `feat(nav): add laser filter`)
@@ -246,6 +251,109 @@ def get_github_user() -> str | None:
     return None
 
 
+def get_available_templates() -> dict[str, str]:
+    return {
+        "python": "Modern Python application/package (src layout, pyproject.toml, pytest, ruff)",
+        "java": "Java Maven service (layered architecture: controller/service/model, JUnit 5)",
+        "typescript": "TypeScript + Vite application (modular components, Vitest, strict TS)",
+        "bash": "Standalone CLI utility in Bash (bin script, install.sh, smoke tests)",
+    }
+
+
+def apply_archetype_template(template_name: str, target_dir: Path, variables: dict[str, str]) -> bool:
+    src_dir = TEMPLATES_DIR / template_name
+    if not src_dir.exists():
+        log_warn(f"Template directory not found at {src_dir}. Using generic scaffolding.")
+        return False
+
+    log_info(f"Applying '{template_name}' archetype scaffolding...")
+    for root, dirs, files in os.walk(src_dir):
+        rel_root = Path(root).relative_to(src_dir)
+
+        # Replace variables in destination directory path
+        dest_rel_str = str(rel_root)
+        for k, v in variables.items():
+            dest_rel_str = dest_rel_str.replace(f"{{{{{k}}}}}", v)
+
+        dest_dir = target_dir if dest_rel_str == "." else target_dir / dest_rel_str
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        for f in files:
+            src_file = Path(root) / f
+            dest_fname = f
+            for k, v in variables.items():
+                dest_fname = dest_fname.replace(f"{{{{{k}}}}}", v)
+
+            dest_file = dest_dir / dest_fname
+
+            try:
+                content = src_file.read_text(encoding="utf-8")
+                for k, v in variables.items():
+                    content = content.replace(f"{{{{{k}}}}}", v)
+                dest_file.write_text(content, encoding="utf-8")
+            except UnicodeDecodeError:
+                # Binary files if any
+                dest_file.write_bytes(src_file.read_bytes())
+
+            # Preserve execute permissions or grant them to scripts/binaries
+            is_executable = (
+                os.access(src_file, os.X_OK)
+                or dest_file.name.endswith(".sh")
+                or dest_dir.name == "bin"
+                or (content.startswith("#!") if "content" in locals() and isinstance(content, str) else False)
+            )
+            if is_executable:
+                dest_file.chmod(0o755)
+
+    log_success(f"Scaffolded '{template_name}' archetype layout.")
+    return True
+
+
+def detect_archetype(repo_root: Path) -> str | None:
+    if (repo_root / "pyproject.toml").exists() or (repo_root / "setup.py").exists():
+        return "python"
+    if (repo_root / "pom.xml").exists() or (repo_root / "build.gradle").exists():
+        return "java"
+    if (repo_root / "tsconfig.json").exists() or (repo_root / "package.json").exists():
+        return "typescript"
+    if (repo_root / "bin").exists() and (repo_root / "install.sh").exists():
+        return "bash"
+    return None
+
+
+def audit_archetype_structure(repo_root: Path, template_name: str | None) -> list[tuple[str, bool]]:
+    archetype = template_name or detect_archetype(repo_root)
+    if not archetype:
+        return []
+
+    checks: list[tuple[str, bool]] = []
+    if archetype == "python":
+        checks = [
+            ("Python: 'src/' layout directory", (repo_root / "src").is_dir()),
+            ("Python: 'tests/' directory", (repo_root / "tests").is_dir()),
+            ("Python: 'pyproject.toml' configuration", (repo_root / "pyproject.toml").exists()),
+        ]
+    elif archetype == "java":
+        checks = [
+            ("Java: 'src/main/java' source tree", (repo_root / "src/main/java").is_dir()),
+            ("Java: 'src/test/java' test tree", (repo_root / "src/test/java").is_dir()),
+            ("Java: 'pom.xml' or 'build.gradle'", (repo_root / "pom.xml").exists() or (repo_root / "build.gradle").exists()),
+        ]
+    elif archetype == "typescript":
+        checks = [
+            ("TypeScript: 'src/' directory", (repo_root / "src").is_dir()),
+            ("TypeScript: 'package.json' manifest", (repo_root / "package.json").exists()),
+            ("TypeScript: 'tsconfig.json' config", (repo_root / "tsconfig.json").exists()),
+        ]
+    elif archetype == "bash":
+        checks = [
+            ("Bash: 'bin/' directory", (repo_root / "bin").is_dir()),
+            ("Bash: 'install.sh' script", (repo_root / "install.sh").exists() and os.access(repo_root / "install.sh", os.X_OK)),
+        ]
+
+    return checks
+
+
 def apply_github_repo_settings(repo_slug: str) -> bool:
     log_info(f"Applying GitHub merge and branch cleanup settings to {repo_slug}...")
     payload = {
@@ -273,7 +381,6 @@ def apply_github_repo_settings(repo_slug: str) -> bool:
 
 def apply_branch_ruleset(repo_slug: str, default_branch: str = "~DEFAULT_BRANCH") -> bool:
     log_info(f"Configuring default branch protection ruleset on {repo_slug}...")
-    # Check if a ruleset named 'default-branch-protection' already exists
     p = subprocess.run(
         ["gh", "api", f"repos/{repo_slug}/rulesets"],
         capture_output=True,
@@ -356,7 +463,6 @@ def install_commit_hook(repo_root: Path) -> bool:
 
 
 def scaffold_templates(repo_root: Path, force: bool = False) -> None:
-    # 1. PR Template
     pr_template_path = repo_root / ".github" / "pull_request_template.md"
     if not pr_template_path.exists() or force:
         pr_template_path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,7 +471,6 @@ def scaffold_templates(repo_root: Path, force: bool = False) -> None:
     else:
         log_info("PR template already exists (use --force to overwrite).")
 
-    # 2. Semantic PR Workflow
     workflow_path = repo_root / ".github" / "workflows" / "semantic-pr.yml"
     if not workflow_path.exists() or force:
         workflow_path.parent.mkdir(parents=True, exist_ok=True)
@@ -375,10 +480,9 @@ def scaffold_templates(repo_root: Path, force: bool = False) -> None:
         log_info("Semantic PR workflow already exists (use --force to overwrite).")
 
 
-def audit_repository(repo_root: Path):
+def audit_repository(repo_root: Path, archetype: str | None = None):
     print(f"\n{BOLD}Auditing Repository Standards:{RESET} {repo_root}\n")
 
-    # Git root check
     slug = get_repo_slug(repo_root)
     if not slug:
         log_error("No GitHub remote origin found for this repository.")
@@ -386,15 +490,12 @@ def audit_repository(repo_root: Path):
 
     print(f"{CYAN}GitHub Repository:{RESET} {slug}\n")
 
-    # Check local hook
     hook_path = repo_root / ".git" / "hooks" / "commit-msg"
     has_hook = hook_path.exists() and os.access(hook_path, os.X_OK)
 
-    # Check templates
     has_pr_template = (repo_root / ".github" / "pull_request_template.md").exists()
     has_workflow = (repo_root / ".github" / "workflows" / "semantic-pr.yml").exists()
 
-    # Query GitHub API for settings
     p = run_cmd(["gh", "api", f"repos/{slug}"], check=False)
     gh_data = json.loads(p.stdout) if p.returncode == 0 else {}
 
@@ -405,7 +506,6 @@ def audit_repository(repo_root: Path):
     title_is_pr = gh_data.get("squash_merge_commit_title") == "PR_TITLE"
     msg_is_pr = gh_data.get("squash_merge_commit_message") in ("PR_BODY", "BLANK")
 
-    # Query Rulesets
     p_rules = run_cmd(["gh", "api", f"repos/{slug}/rulesets"], check=False)
     has_ruleset = False
     if p_rules.returncode == 0:
@@ -415,7 +515,6 @@ def audit_repository(repo_root: Path):
         except Exception:
             pass
 
-    # Display audit results
     items = [
         ("Squash & Merge Enabled", squash_enabled),
         ("Merge Commits Disabled", merge_commit_disabled),
@@ -430,12 +529,25 @@ def audit_repository(repo_root: Path):
     ]
 
     all_passed = True
+    print(f"{BOLD}DevOps & Git Governance Standards:{RESET}")
     for label, passed in items:
         if passed:
             print(f"  {GREEN}✔{RESET} {label}")
         else:
             print(f"  {RED}✘{RESET} {label}")
             all_passed = False
+
+    # Structure checks
+    struct_checks = audit_archetype_structure(repo_root, archetype)
+    if struct_checks:
+        detected = archetype or detect_archetype(repo_root)
+        print(f"\n{BOLD}Archetype Structure Standards ({detected}):{RESET}")
+        for label, passed in struct_checks:
+            if passed:
+                print(f"  {GREEN}✔{RESET} {label}")
+            else:
+                print(f"  {RED}✘{RESET} {label}")
+                all_passed = False
 
     print()
     if all_passed:
@@ -457,16 +569,9 @@ def configure_repository(target: str | None, force: bool = False):
 
     print(f"{BOLD}Configuring Repository:{RESET} {slug} ({repo_root})\n")
 
-    # 1. Update GitHub Settings
     apply_github_repo_settings(slug)
-
-    # 2. Apply Ruleset
     apply_branch_ruleset(slug)
-
-    # 3. Install commit-msg hook
     install_commit_hook(repo_root)
-
-    # 4. Scaffold PR template and semantic-pr workflow
     scaffold_templates(repo_root, force=force)
 
     print()
@@ -477,6 +582,7 @@ def create_repository(
     name: str,
     description: str = "",
     public: bool = False,
+    template_type: str | None = None,
     target_dir: str | None = None,
 ):
     user = get_github_user()
@@ -506,15 +612,37 @@ def create_repository(
 
     log_success(f"GitHub repository created: https://github.com/{slug}")
 
-    # Initialize local git
     log_info(f"Initialising local repository at {path}...")
     run_cmd(["git", "init", "-b", "main"], cwd=path)
     run_cmd(["git", "remote", "add", "origin", f"https://github.com/{slug}.git"], cwd=path)
 
-    # Scaffold templates
-    readme_content = DEFAULT_README.format(repo_name=name, description=description or "A modern robotics / software engineering project.", repo_slug=slug)
-    (path / "README.md").write_text(readme_content)
-    (path / ".gitignore").write_text(DEFAULT_GITIGNORE)
+    # Variables for templating
+    pkg_name = re.sub(r"[^a-zA-Z0-9_]", "_", name).lower()
+    if pkg_name and pkg_name[0].isdigit():
+        pkg_name = f"pkg_{pkg_name}"
+
+    variables = {
+        "repo_name": name,
+        "package_name": pkg_name,
+        "description": description or f"A standardised {template_type or 'software'} project.",
+        "author": "Cooper Wallace",
+        "year": "2026",
+        "repo_slug": slug,
+    }
+
+    # Apply archetype template if specified
+    if template_type:
+        apply_archetype_template(template_type, path, variables)
+    else:
+        readme_content = DEFAULT_README.format(
+            repo_name=name,
+            description=description or "A modern software engineering project.",
+            repo_slug=slug,
+        )
+        (path / "README.md").write_text(readme_content)
+        (path / ".gitignore").write_text(DEFAULT_GITIGNORE)
+
+    # Core DevOps scaffolds
     scaffold_templates(path, force=True)
     install_commit_hook(path)
 
@@ -539,6 +667,15 @@ def create_repository(
     print("  git checkout -b feat/initial-setup\n")
 
 
+def print_templates():
+    templates = get_available_templates()
+    print(f"\n{BOLD}Available Solution Archetypes:{RESET}\n")
+    for name, desc in templates.items():
+        print(f"  {CYAN}{name:<12}{RESET} {desc}")
+    print(f"\n{BOLD}Usage Example:{RESET}")
+    print("  gh-standardise create my-api --type python --public -d 'My Python service'\n")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="gh-standardise",
@@ -550,6 +687,7 @@ def main():
     create_parser = subparsers.add_parser("create", help="Create a new standardised GitHub repo")
     create_parser.add_argument("name", help="Repository name")
     create_parser.add_argument("-d", "--description", default="", help="Repository description")
+    create_parser.add_argument("-t", "--type", choices=["python", "java", "typescript", "bash"], default=None, help="Solution archetype template")
     create_parser.add_argument("--public", action="store_true", help="Create as public repository (default: private)")
     create_parser.add_argument("--path", help="Local directory path (default: ./{name})")
 
@@ -561,6 +699,10 @@ def main():
     # audit
     audit_parser = subparsers.add_parser("audit", help="Audit repository compliance against standards")
     audit_parser.add_argument("path", nargs="?", default=None, help="Path to repo directory (default: current directory)")
+    audit_parser.add_argument("-t", "--type", choices=["python", "java", "typescript", "bash"], default=None, help="Specific archetype to verify")
+
+    # templates
+    subparsers.add_parser("templates", help="List available solution archetype templates")
 
     # hook
     hook_parser = subparsers.add_parser("hook", help="Git hooks management")
@@ -575,6 +717,7 @@ def main():
             name=args.name,
             description=args.description,
             public=args.public,
+            template_type=args.type,
             target_dir=args.path,
         )
     elif args.command == "configure":
@@ -584,7 +727,9 @@ def main():
         if not repo_root:
             log_error("Not inside a git repository.")
             sys.exit(1)
-        audit_repository(repo_root)
+        audit_repository(repo_root, archetype=args.type)
+    elif args.command == "templates":
+        print_templates()
     elif args.command == "hook" and args.hook_command == "install":
         repo_root = get_git_repo_root(Path(args.path) if args.path else None)
         if not repo_root:
