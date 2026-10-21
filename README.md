@@ -40,6 +40,17 @@ For solo developers, engineers, and researchers, pushing directly to `main` with
 
 ---
 
+## Ecosystem Integration
+
+`gh-standardise` acts as **Layer 3 (Remote DevOps Governance)** within the 4-layer modular workstation stack:
+
+- **Layer 0 (`riced-kubuntu-os`)**: Kubuntu OS, KDE Plasma 6 desktop configuration, and hardware pipelines.
+- **Layer 1 (`workstation-setup`)**: Cross-platform developer toolchains (`uv`, `node`/`fnm`, `rustup`) and shell environments across Linux, macOS, and Windows.
+- **Layer 2 (`antigravity-standardise`)**: AI pair programmer harness permissions, global agent directives (`AGENTS.md`), MCP servers, and autonomous workflows.
+- **Layer 3 (`gh-standardise`)**: Remote GitHub repository rulesets, squash-and-merge enforcement, and semantic PR CI quality gates.
+
+---
+
 ## Installation
 
 ### Quick Install (Symlink to `~/.local/bin`)

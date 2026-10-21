@@ -1,0 +1,61 @@
+name: "Reusable Bash CI"
+
+on:
+  workflow_call:
+
+jobs:
+  test:
+    name: "Test & Coverage"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        run: |
+          echo "### ShellCheck Results" >> "$GITHUB_STEP_SUMMARY"
+          if command -v shellcheck >/dev/null 2>&1; then
+            FILES_TO_CHECK=()
+            for f in bin/* *.sh; do
+              if [ -f "$f" ]; then
+                FILES_TO_CHECK+=("$f")
+              fi
+            done
+            if [ ${#FILES_TO_CHECK[@]} -gt 0 ]; then
+              shellcheck "${FILES_TO_CHECK[@]}"
+              echo "ShellCheck verified ${#FILES_TO_CHECK[@]} script(s) cleanly." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "No shell scripts found to audit." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "ShellCheck not installed on runner; skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Execute test scripts in tests/
+        run: |
+          echo "### Bash Test Suite Execution" >> "$GITHUB_STEP_SUMMARY"
+          TEST_COUNT=0
+          FAIL_COUNT=0
+          if [ -d "tests" ]; then
+            for test_script in tests/*.sh tests/test_*.sh; do
+              if [ -f "$test_script" ]; then
+                TEST_COUNT=$((TEST_COUNT + 1))
+                chmod +x "$test_script"
+                echo "Executing $test_script..."
+                if bash "$test_script"; then
+                  echo "- :white_check_mark: \`$test_script\` passed" >> "$GITHUB_STEP_SUMMARY"
+                else
+                  echo "- :x: \`$test_script\` failed" >> "$GITHUB_STEP_SUMMARY"
+                  FAIL_COUNT=$((FAIL_COUNT + 1))
+                fi
+              fi
+            done
+          fi
+          if [ $TEST_COUNT -eq 0 ]; then
+            echo "No test scripts found in \`tests/\`." >> "$GITHUB_STEP_SUMMARY"
+          elif [ $FAIL_COUNT -gt 0 ]; then
+            echo "Failed $FAIL_COUNT of $TEST_COUNT test script(s)." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          else
+            echo "All $TEST_COUNT test script(s) passed successfully." >> "$GITHUB_STEP_SUMMARY"
+          fi

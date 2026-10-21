@@ -1,5 +1,5 @@
 """
-Tests for gh-standardise CLI tool.
+Tests for repokit CLI tool.
 """
 
 import os
@@ -14,17 +14,17 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
-# Import functions from bin/gh-standardise
+# Import functions from bin/repokit
 import importlib.machinery
 import importlib.util
 
-loader = importlib.machinery.SourceFileLoader("gh_standardise", str(REPO_ROOT / "bin" / "gh-standardise"))
-spec = importlib.util.spec_from_loader("gh_standardise", loader)
-gh_standardise = importlib.util.module_from_spec(spec)
-loader.exec_module(gh_standardise)
+loader = importlib.machinery.SourceFileLoader("repokit", str(REPO_ROOT / "bin" / "repokit"))
+spec = importlib.util.spec_from_loader("repokit", loader)
+repokit = importlib.util.module_from_spec(spec)
+loader.exec_module(repokit)
 
-PATTERN = gh_standardise.COMMIT_PATTERN
-BIN_CMD = [sys.executable, str(REPO_ROOT / "bin" / "gh-standardise")]
+PATTERN = repokit.COMMIT_PATTERN
+BIN_CMD = [sys.executable, str(REPO_ROOT / "bin" / "repokit")]
 
 
 class TestConventionalCommits(unittest.TestCase):
@@ -84,6 +84,21 @@ class TestConventionalCommits(unittest.TestCase):
             res_good = subprocess.run(["git", "commit", "-m", "feat(core): initial test commit"], cwd=p, capture_output=True, text=True)
             self.assertEqual(res_good.returncode, 0, f"Valid commit should succeed: {res_good.stderr}")
 
+    def test_hook_install_pre_commit_and_commit_msg(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=p, check=True, capture_output=True)
+            res = subprocess.run([*BIN_CMD, "hook", "install", "--all", str(p)], check=True, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0)
+
+            commit_hook = p / ".git" / "hooks" / "commit-msg"
+            pre_hook = p / ".git" / "hooks" / "pre-commit"
+
+            self.assertTrue(commit_hook.exists(), "commit-msg hook should exist")
+            self.assertTrue(pre_hook.exists(), "pre-commit hook should exist")
+            self.assertTrue(os.access(commit_hook, os.X_OK), "commit-msg hook should be executable")
+            self.assertTrue(os.access(pre_hook, os.X_OK), "pre-commit hook should be executable")
+
 
 class TestArchetypeTemplates(unittest.TestCase):
     def test_python_scaffold(self):
@@ -97,12 +112,13 @@ class TestArchetypeTemplates(unittest.TestCase):
                 "year": "2026",
                 "repo_slug": "Cooper-Wallace/sample-pkg",
             }
-            res = gh_standardise.apply_archetype_template("python", target, variables)
+            res = repokit.apply_archetype_template("python", target, variables)
             self.assertTrue(res)
             self.assertTrue((target / "pyproject.toml").exists())
             self.assertTrue((target / "src" / "sample_pkg" / "__init__.py").exists())
             self.assertTrue((target / "src" / "sample_pkg" / "core.py").exists())
             self.assertTrue((target / "tests" / "test_core.py").exists())
+            self.assertTrue((target / ".github" / "workflows" / "ci.yml").exists())
 
             # Verify variable substitution
             content = (target / "src" / "sample_pkg" / "core.py").read_text()
@@ -110,7 +126,7 @@ class TestArchetypeTemplates(unittest.TestCase):
             self.assertNotIn("{{repo_name}}", content)
 
             # Audit check
-            checks = gh_standardise.audit_archetype_structure(target, "python")
+            checks = repokit.audit_archetype_structure(target, "python")
             self.assertTrue(all(passed for _, passed in checks))
 
     def test_java_scaffold(self):
@@ -124,14 +140,15 @@ class TestArchetypeTemplates(unittest.TestCase):
                 "year": "2026",
                 "repo_slug": "Cooper-Wallace/sample-api",
             }
-            res = gh_standardise.apply_archetype_template("java", target, variables)
+            res = repokit.apply_archetype_template("java", target, variables)
             self.assertTrue(res)
             self.assertTrue((target / "pom.xml").exists())
             self.assertTrue((target / "src/main/java/com/cooper/sample_api/Application.java").exists())
             self.assertTrue((target / "src/main/java/com/cooper/sample_api/controller/HealthController.java").exists())
             self.assertTrue((target / "src/test/java/com/cooper/sample_api/ApplicationTests.java").exists())
+            self.assertTrue((target / ".github" / "workflows" / "ci.yml").exists())
 
-            checks = gh_standardise.audit_archetype_structure(target, "java")
+            checks = repokit.audit_archetype_structure(target, "java")
             self.assertTrue(all(passed for _, passed in checks))
 
     def test_typescript_scaffold(self):
@@ -145,15 +162,16 @@ class TestArchetypeTemplates(unittest.TestCase):
                 "year": "2026",
                 "repo_slug": "Cooper-Wallace/sample-ui",
             }
-            res = gh_standardise.apply_archetype_template("typescript", target, variables)
+            res = repokit.apply_archetype_template("typescript", target, variables)
             self.assertTrue(res)
             self.assertTrue((target / "package.json").exists())
             self.assertTrue((target / "tsconfig.json").exists())
             self.assertTrue((target / "vite.config.ts").exists())
             self.assertTrue((target / "src/main.ts").exists())
             self.assertTrue((target / "tests/api.test.ts").exists())
+            self.assertTrue((target / ".github" / "workflows" / "ci.yml").exists())
 
-            checks = gh_standardise.audit_archetype_structure(target, "typescript")
+            checks = repokit.audit_archetype_structure(target, "typescript")
             self.assertTrue(all(passed for _, passed in checks))
 
     def test_bash_scaffold(self):
@@ -167,13 +185,14 @@ class TestArchetypeTemplates(unittest.TestCase):
                 "year": "2026",
                 "repo_slug": "Cooper-Wallace/sample-cli",
             }
-            res = gh_standardise.apply_archetype_template("bash", target, variables)
+            res = repokit.apply_archetype_template("bash", target, variables)
             self.assertTrue(res)
             self.assertTrue((target / "bin/sample-cli").exists())
             self.assertTrue((target / "install.sh").exists())
             self.assertTrue(os.access(target / "bin/sample-cli", os.X_OK))
+            self.assertTrue((target / ".github" / "workflows" / "ci.yml").exists())
 
-            checks = gh_standardise.audit_archetype_structure(target, "bash")
+            checks = repokit.audit_archetype_structure(target, "bash")
             self.assertTrue(all(passed for _, passed in checks))
 
 
@@ -181,7 +200,7 @@ class TestCLICommands(unittest.TestCase):
     def test_help_command(self):
         res = subprocess.run([*BIN_CMD, "--help"], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0)
-        self.assertIn("gh-standardise", res.stdout)
+        self.assertIn("repokit", res.stdout)
         self.assertIn("create", res.stdout)
         self.assertIn("configure", res.stdout)
         self.assertIn("audit", res.stdout)
@@ -194,6 +213,28 @@ class TestCLICommands(unittest.TestCase):
         self.assertIn("java", res.stdout)
         self.assertIn("typescript", res.stdout)
         self.assertIn("bash", res.stdout)
+
+    def test_audit_local_fast(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=p, check=True, capture_output=True)
+
+            # Audit should fail on empty repository without standards
+            res_bad = subprocess.run([*BIN_CMD, "audit", str(p), "--local"], capture_output=True, text=True)
+            self.assertNotEqual(res_bad.returncode, 0, "Audit should fail on empty repository")
+
+            # Apply required local standards
+            subprocess.run([*BIN_CMD, "hook", "install", "--all", str(p)], check=True, capture_output=True)
+            (p / ".github").mkdir(parents=True, exist_ok=True)
+            (p / ".github" / "pull_request_template.md").write_text("## Summary\n")
+            (p / ".github" / "workflows").mkdir(parents=True, exist_ok=True)
+            (p / ".github" / "workflows" / "ci.yml").write_text("name: CI\n")
+            (p / "src").mkdir(parents=True, exist_ok=True)
+
+            # Audit should now pass quickly
+            res_good = subprocess.run([*BIN_CMD, "audit", str(p), "--local"], capture_output=True, text=True)
+            self.assertEqual(res_good.returncode, 0, f"Audit should pass for valid repository: {res_good.stderr}")
+            self.assertIn("All repository standards are strictly satisfied", res_good.stdout)
 
 
 if __name__ == "__main__":
