@@ -12,10 +12,10 @@ permissions:
 
 jobs:
   validate-pr:
-    uses: cooperwallace/gh-standardise/.github/workflows/semantic-pr.yml@main
+    uses: {{governance_slug}}/.github/workflows/semantic-pr.yml@main
 
   ci:
-    uses: cooperwallace/gh-standardise/.github/workflows/reusable-python.yml@main
+    uses: {{governance_slug}}/.github/workflows/reusable-python.yml@main
     with:
       python-version: "3.11"
       min-coverage: 80

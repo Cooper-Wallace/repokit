@@ -31,6 +31,7 @@ BOLD = "\033[1m"
 RESET = "\033[0m"
 
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+DEFAULT_GOVERNANCE_REPO = "Cooper-Wallace/repokit"
 
 COMMIT_PATTERN = r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_.-]+\))?!?: .+$"
 
@@ -280,11 +281,21 @@ def get_available_templates() -> dict[str, str]:
     }
 
 
-def apply_archetype_template(template_name: str, target_dir: Path, variables: dict[str, str]) -> bool:
+def apply_archetype_template(
+    template_name: str,
+    target_dir: Path,
+    variables: dict[str, str] | None = None,
+) -> bool:
     src_dir = TEMPLATES_DIR / template_name
     if not src_dir.exists():
         log_warn(f"Template directory not found at {src_dir}. Using generic scaffolding.")
         return False
+
+    vars_dict = {"governance_slug": DEFAULT_GOVERNANCE_REPO}
+    if variables:
+        vars_dict.update(variables)
+    if "governance_slug" not in vars_dict:
+        vars_dict["governance_slug"] = DEFAULT_GOVERNANCE_REPO
 
     log_info(f"Applying '{template_name}' archetype scaffolding...")
     for root, dirs, files in os.walk(src_dir):
@@ -292,7 +303,7 @@ def apply_archetype_template(template_name: str, target_dir: Path, variables: di
 
         # Replace variables in destination directory path
         dest_rel_str = str(rel_root)
-        for k, v in variables.items():
+        for k, v in vars_dict.items():
             dest_rel_str = dest_rel_str.replace(f"{{{{{k}}}}}", v)
 
         dest_dir = target_dir if dest_rel_str == "." else target_dir / dest_rel_str
@@ -301,14 +312,14 @@ def apply_archetype_template(template_name: str, target_dir: Path, variables: di
         for f in files:
             src_file = Path(root) / f
             dest_fname = f
-            for k, v in variables.items():
+            for k, v in vars_dict.items():
                 dest_fname = dest_fname.replace(f"{{{{{k}}}}}", v)
 
             dest_file = dest_dir / dest_fname
 
             try:
                 content = src_file.read_text(encoding="utf-8")
-                for k, v in variables.items():
+                for k, v in vars_dict.items():
                     content = content.replace(f"{{{{{k}}}}}", v)
                 dest_file.write_text(content, encoding="utf-8")
             except UnicodeDecodeError:
@@ -612,16 +623,40 @@ def audit_repository(
         has_pre_hook = pre_hook_path.exists() and os.access(pre_hook_path, os.X_OK)
 
         has_pr_template = (repo_root / ".github" / "pull_request_template.md").exists()
-        has_workflow = (
-            (repo_root / ".github" / "workflows" / "semantic-pr.yml").exists()
-            or (repo_root / ".github" / "workflows" / "ci.yml").exists()
+
+        is_governance_hub = (
+            (repo_root / ".github" / "workflows" / "reusable-python.yml").exists()
+            and (repo_root / "bin" / "repokit").exists()
         )
+        if is_governance_hub:
+            has_ci_workflow = (repo_root / ".github" / "workflows" / "test.yml").exists()
+            ci_label = "Central Reusable Workflows Hub Hosted (.github/workflows/reusable-*.yml)"
+        else:
+            ci_workflow_path = repo_root / ".github" / "workflows" / "ci.yml"
+            has_ci_workflow = False
+            if ci_workflow_path.exists():
+                try:
+                    ci_content = ci_workflow_path.read_text(encoding="utf-8")
+                    if (
+                        DEFAULT_GOVERNANCE_REPO in ci_content
+                        or "reusable-" in ci_content
+                        or "Cooper-Wallace/repokit" in ci_content
+                    ):
+                        has_ci_workflow = True
+                except Exception:
+                    pass
+
+            ci_label = (
+                "CI Workflow calling central repokit workflows (.github/workflows/ci.yml)"
+                if has_ci_workflow
+                else "CI Workflow missing or not calling central repokit reusable workflows"
+            )
 
         local_items = [
             ("Local Conventional Commit Hook Installed (.git/hooks/commit-msg)", has_hook),
             ("Local Pre-commit Hook Installed (.git/hooks/pre-commit)", has_pre_hook),
             ("Pull Request Template (.github/pull_request_template.md)", has_pr_template),
-            ("CI / Semantic PR Workflow (.github/workflows/semantic-pr.yml or ci.yml)", has_workflow),
+            (ci_label, has_ci_workflow),
         ]
 
     all_passed = True
@@ -680,6 +715,25 @@ def audit_repository(
         return False
 
 
+def scaffold_archetype_ci(repo_root: Path, force: bool = False) -> bool:
+    archetype = detect_archetype(repo_root)
+    if not archetype:
+        return False
+    template_ci = TEMPLATES_DIR / archetype / ".github" / "workflows" / "ci.yml"
+    target_ci = repo_root / ".github" / "workflows" / "ci.yml"
+    if template_ci.exists() and (not target_ci.exists() or force):
+        target_ci.parent.mkdir(parents=True, exist_ok=True)
+        content = template_ci.read_text(encoding="utf-8")
+        content = content.replace("{{governance_slug}}", DEFAULT_GOVERNANCE_REPO)
+        target_ci.write_text(content, encoding="utf-8")
+        log_success("Scaffolded CI workflow calling central repokit workflows (.github/workflows/ci.yml)")
+        return True
+    elif target_ci.exists() and not force:
+        log_info("CI workflow already exists (use --force to overwrite).")
+        return False
+    return False
+
+
 def configure_repository(target: str | None, force: bool = False):
     repo_root = get_git_repo_root(Path(target) if target else None)
     if not repo_root:
@@ -697,6 +751,7 @@ def configure_repository(target: str | None, force: bool = False):
     apply_branch_ruleset(slug)
     install_hooks(repo_root, all_hooks=True)
     scaffold_templates(repo_root, force=force)
+    scaffold_archetype_ci(repo_root, force=force)
 
     print()
     log_success("Repository configuration complete!")
@@ -752,6 +807,7 @@ def create_repository(
         "author": "Cooper Wallace",
         "year": "2026",
         "repo_slug": slug,
+        "governance_slug": DEFAULT_GOVERNANCE_REPO,
     }
 
     # Apply archetype template if specified

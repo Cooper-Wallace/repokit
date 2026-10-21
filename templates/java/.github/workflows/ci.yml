@@ -12,10 +12,10 @@ permissions:
 
 jobs:
   validate-pr:
-    uses: cooperwallace/gh-standardise/.github/workflows/semantic-pr.yml@main
+    uses: {{governance_slug}}/.github/workflows/semantic-pr.yml@main
 
   ci:
-    uses: cooperwallace/gh-standardise/.github/workflows/reusable-java.yml@main
+    uses: {{governance_slug}}/.github/workflows/reusable-java.yml@main
     with:
       java-version: "21"
       min-coverage: 80

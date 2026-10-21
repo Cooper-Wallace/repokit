@@ -12,10 +12,10 @@ permissions:
 
 jobs:
   validate-pr:
-    uses: cooperwallace/gh-standardise/.github/workflows/semantic-pr.yml@main
+    uses: {{governance_slug}}/.github/workflows/semantic-pr.yml@main
 
   ci:
-    uses: cooperwallace/gh-standardise/.github/workflows/reusable-typescript.yml@main
+    uses: {{governance_slug}}/.github/workflows/reusable-typescript.yml@main
     with:
       node-version: "20"
       min-coverage: 80
