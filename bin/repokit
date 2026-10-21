@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-gh-standardise: Automate GitHub repository DevOps, Git hygiene, and archetype standards.
+repokit: Automate GitHub repository DevOps, Git hygiene, and archetype standards.
 
 Features:
 - Enforce clean GitHub merge strategies (Squash & Merge only, PR_TITLE, PR_BODY, delete branch on merge)
 - Enforce branch protection / Rulesets on default branch (no direct pushes, require PR, prevent force push & deletion)
-- Install local Conventional Commits hook (.git/hooks/commit-msg)
+- Install local Conventional Commits hook (.git/hooks/commit-msg) and pre-commit audit hook (.git/hooks/pre-commit)
 - Scaffold GitHub PR template (.github/pull_request_template.md)
 - Scaffold Semantic PR GitHub Actions workflow (.github/workflows/semantic-pr.yml)
 - Scaffold industry-standard solution archetypes (Python, Java, TypeScript, Bash)
-- Audit existing repositories against DevOps and structural archetype standards
+- Audit existing repositories against DevOps and structural archetype standards (offline --local or remote)
 - Create new portfolio-ready repositories with all standards pre-configured
 """
 
@@ -60,6 +60,26 @@ if ! echo "$COMMIT_MSG" | grep -Eq "$PATTERN"; then
     echo "  fix(launch): correct topic remapping in simulation"
     echo "  docs(readme): add setup and launch instructions"
     echo -e "\033[1;31mYour input:\033[0m \"$COMMIT_MSG\""
+    exit 1
+fi
+'''
+
+PRE_COMMIT_HOOK = r'''#!/usr/bin/env bash
+# Git pre-commit hook enforcing repokit local standards
+
+if command -v repokit >/dev/null 2>&1; then
+    REPOKIT_CMD="repokit"
+elif [ -x "{bin_path}" ]; then
+    REPOKIT_CMD="{bin_path}"
+elif [ -x "${{HOME}}/.local/bin/repokit" ]; then
+    REPOKIT_CMD="${{HOME}}/.local/bin/repokit"
+else
+    REPOKIT_CMD="repokit"
+fi
+
+if ! "$REPOKIT_CMD" audit --local; then
+    echo -e "\033[1;31m[ERROR] Pre-commit check failed: Repository structure does not meet standards.\033[0m"
+    echo -e "\033[1;33mPlease run:\033[0m repokit configure"
     exit 1
 fi
 '''
@@ -420,6 +440,17 @@ def apply_branch_ruleset(repo_slug: str, default_branch: str = "~DEFAULT_BRANCH"
                     "required_review_thread_resolution": False,
                 },
             },
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "strict_required_status_checks_policy": True,
+                    "do_not_enforce_on_create": False,
+                    "required_status_checks": [
+                        {"context": "validate-pr / Validate Conventional Commit PR Title"},
+                        {"context": "ci / Test & Coverage"},
+                    ],
+                },
+            },
         ],
     }
 
@@ -462,6 +493,29 @@ def install_commit_hook(repo_root: Path) -> bool:
         return False
 
 
+def install_pre_commit_hook(repo_root: Path) -> bool:
+    hook_path = repo_root / ".git" / "hooks" / "pre-commit"
+    bin_path = str(Path(__file__).resolve())
+    hook_content = PRE_COMMIT_HOOK.format(bin_path=bin_path)
+    try:
+        hook_path.parent.mkdir(parents=True, exist_ok=True)
+        hook_path.write_text(hook_content)
+        hook_path.chmod(0o755)
+        log_success(f"Installed pre-commit audit hook: {hook_path.relative_to(repo_root)}")
+        return True
+    except Exception as e:
+        log_error(f"Failed to install git pre-commit hook: {e}")
+        return False
+
+
+def install_hooks(repo_root: Path, all_hooks: bool = False) -> bool:
+    c_ok = install_commit_hook(repo_root)
+    if all_hooks:
+        p_ok = install_pre_commit_hook(repo_root)
+        return c_ok and p_ok
+    return c_ok
+
+
 def scaffold_templates(repo_root: Path, force: bool = False) -> None:
     pr_template_path = repo_root / ".github" / "pull_request_template.md"
     if not pr_template_path.exists() or force:
@@ -480,80 +534,150 @@ def scaffold_templates(repo_root: Path, force: bool = False) -> None:
         log_info("Semantic PR workflow already exists (use --force to overwrite).")
 
 
-def audit_repository(repo_root: Path, archetype: str | None = None):
+def audit_repository(
+    repo_root: Path,
+    archetype: str | None = None,
+    local_only: bool = False,
+    remote_only: bool = False,
+) -> bool:
     print(f"\n{BOLD}Auditing Repository Standards:{RESET} {repo_root}\n")
 
-    slug = get_repo_slug(repo_root)
-    if not slug:
-        log_error("No GitHub remote origin found for this repository.")
-        return
+    if local_only and remote_only:
+        run_local = True
+        run_remote = True
+    elif local_only:
+        run_local = True
+        run_remote = False
+    elif remote_only:
+        run_local = False
+        run_remote = True
+    else:
+        run_local = True
+        run_remote = True
 
-    print(f"{CYAN}GitHub Repository:{RESET} {slug}\n")
+    slug = None
+    if run_remote:
+        slug = get_repo_slug(repo_root)
+        if not slug:
+            log_error("No GitHub remote origin found for this repository.")
+            return False
+        print(f"{CYAN}GitHub Repository:{RESET} {slug}\n")
+    else:
+        slug = get_repo_slug(repo_root)
+        if slug:
+            print(f"{CYAN}GitHub Repository:{RESET} {slug} (local audit only)\n")
+        else:
+            print(f"{CYAN}Local Repository:{RESET} {repo_root.name} (local audit only)\n")
 
-    hook_path = repo_root / ".git" / "hooks" / "commit-msg"
-    has_hook = hook_path.exists() and os.access(hook_path, os.X_OK)
+    remote_items: list[tuple[str, bool]] = []
+    if run_remote and slug:
+        p = run_cmd(["gh", "api", f"repos/{slug}"], check=False)
+        gh_data = json.loads(p.stdout) if p.returncode == 0 else {}
 
-    has_pr_template = (repo_root / ".github" / "pull_request_template.md").exists()
-    has_workflow = (repo_root / ".github" / "workflows" / "semantic-pr.yml").exists()
+        squash_enabled = gh_data.get("allow_squash_merge") is True
+        merge_commit_disabled = gh_data.get("allow_merge_commit") is False
+        rebase_disabled = gh_data.get("allow_rebase_merge") is False
+        delete_branch = gh_data.get("delete_branch_on_merge") is True
+        title_is_pr = gh_data.get("squash_merge_commit_title") == "PR_TITLE"
+        msg_is_pr = gh_data.get("squash_merge_commit_message") in ("PR_BODY", "BLANK")
 
-    p = run_cmd(["gh", "api", f"repos/{slug}"], check=False)
-    gh_data = json.loads(p.stdout) if p.returncode == 0 else {}
+        p_rules = run_cmd(["gh", "api", f"repos/{slug}/rulesets"], check=False)
+        has_ruleset = False
+        if p_rules.returncode == 0:
+            try:
+                rulesets = json.loads(p_rules.stdout)
+                has_ruleset = any(
+                    r.get("name") == "default-branch-protection" and r.get("enforcement") == "active"
+                    for r in rulesets
+                )
+            except Exception:
+                pass
 
-    squash_enabled = gh_data.get("allow_squash_merge") is True
-    merge_commit_disabled = gh_data.get("allow_merge_commit") is False
-    rebase_disabled = gh_data.get("allow_rebase_merge") is False
-    delete_branch = gh_data.get("delete_branch_on_merge") is True
-    title_is_pr = gh_data.get("squash_merge_commit_title") == "PR_TITLE"
-    msg_is_pr = gh_data.get("squash_merge_commit_message") in ("PR_BODY", "BLANK")
+        remote_items = [
+            ("Squash & Merge Enabled", squash_enabled),
+            ("Merge Commits Disabled", merge_commit_disabled),
+            ("Rebase Commits Disabled", rebase_disabled),
+            ("Auto-Delete Head Branches on Merge", delete_branch),
+            ("Squash Commit Title set to PR_TITLE", title_is_pr),
+            ("Squash Commit Message set to PR_BODY", msg_is_pr),
+            ("Default Branch Protection Ruleset Active", has_ruleset),
+        ]
 
-    p_rules = run_cmd(["gh", "api", f"repos/{slug}/rulesets"], check=False)
-    has_ruleset = False
-    if p_rules.returncode == 0:
-        try:
-            rulesets = json.loads(p_rules.stdout)
-            has_ruleset = any(r.get("name") == "default-branch-protection" and r.get("enforcement") == "active" for r in rulesets)
-        except Exception:
-            pass
+    local_items: list[tuple[str, bool]] = []
+    if run_local:
+        hook_path = repo_root / ".git" / "hooks" / "commit-msg"
+        has_hook = hook_path.exists() and os.access(hook_path, os.X_OK)
 
-    items = [
-        ("Squash & Merge Enabled", squash_enabled),
-        ("Merge Commits Disabled", merge_commit_disabled),
-        ("Rebase Commits Disabled", rebase_disabled),
-        ("Auto-Delete Head Branches on Merge", delete_branch),
-        ("Squash Commit Title set to PR_TITLE", title_is_pr),
-        ("Squash Commit Message set to PR_BODY", msg_is_pr),
-        ("Default Branch Protection Ruleset Active", has_ruleset),
-        ("Local Conventional Commit Hook Installed", has_hook),
-        ("Pull Request Template (.github/pull_request_template.md)", has_pr_template),
-        ("Semantic PR CI Workflow (.github/workflows/semantic-pr.yml)", has_workflow),
-    ]
+        pre_hook_path = repo_root / ".git" / "hooks" / "pre-commit"
+        has_pre_hook = pre_hook_path.exists() and os.access(pre_hook_path, os.X_OK)
+
+        has_pr_template = (repo_root / ".github" / "pull_request_template.md").exists()
+        has_workflow = (
+            (repo_root / ".github" / "workflows" / "semantic-pr.yml").exists()
+            or (repo_root / ".github" / "workflows" / "ci.yml").exists()
+        )
+
+        local_items = [
+            ("Local Conventional Commit Hook Installed (.git/hooks/commit-msg)", has_hook),
+            ("Local Pre-commit Hook Installed (.git/hooks/pre-commit)", has_pre_hook),
+            ("Pull Request Template (.github/pull_request_template.md)", has_pr_template),
+            ("CI / Semantic PR Workflow (.github/workflows/semantic-pr.yml or ci.yml)", has_workflow),
+        ]
 
     all_passed = True
-    print(f"{BOLD}DevOps & Git Governance Standards:{RESET}")
-    for label, passed in items:
-        if passed:
-            print(f"  {GREEN}✔{RESET} {label}")
-        else:
-            print(f"  {RED}✘{RESET} {label}")
-            all_passed = False
 
-    # Structure checks
-    struct_checks = audit_archetype_structure(repo_root, archetype)
-    if struct_checks:
-        detected = archetype or detect_archetype(repo_root)
-        print(f"\n{BOLD}Archetype Structure Standards ({detected}):{RESET}")
-        for label, passed in struct_checks:
+    if remote_items:
+        print(f"{BOLD}GitHub Remote Governance Standards:{RESET}")
+        for label, passed in remote_items:
             if passed:
                 print(f"  {GREEN}✔{RESET} {label}")
             else:
                 print(f"  {RED}✘{RESET} {label}")
                 all_passed = False
 
+    if local_items:
+        if remote_items:
+            print()
+        print(f"{BOLD}Local Repository Standards:{RESET}")
+        for label, passed in local_items:
+            if passed:
+                print(f"  {GREEN}✔{RESET} {label}")
+            else:
+                print(f"  {RED}✘{RESET} {label}")
+                all_passed = False
+
+    # Structure checks (performed in local or default mode)
+    if run_local:
+        struct_checks = audit_archetype_structure(repo_root, archetype)
+        detected = archetype or detect_archetype(repo_root)
+        if struct_checks:
+            print(f"\n{BOLD}Archetype Structure Standards ({detected}):{RESET}")
+            for label, passed in struct_checks:
+                if passed:
+                    print(f"  {GREEN}✔{RESET} {label}")
+                else:
+                    print(f"  {RED}✘{RESET} {label}")
+                    all_passed = False
+        else:
+            has_src_dir = (
+                (repo_root / "src").is_dir()
+                or (repo_root / "bin").is_dir()
+                or (repo_root / "src/main/java").is_dir()
+            )
+            print(f"\n{BOLD}Repository Structure Standards:{RESET}")
+            if has_src_dir:
+                print(f"  {GREEN}✔{RESET} Source directory structure present ('src/' or 'bin/')")
+            else:
+                print(f"  {RED}✘{RESET} Source directory structure missing (expected 'src/' or 'bin/')")
+                all_passed = False
+
     print()
     if all_passed:
         log_success("All repository standards are strictly satisfied!")
+        return True
     else:
-        log_warn("Some standards are missing. Run `gh-standardise configure` to automatically apply them.")
+        log_warn("Some standards are missing. Run `repokit configure` to automatically apply them.")
+        return False
 
 
 def configure_repository(target: str | None, force: bool = False):
@@ -571,7 +695,7 @@ def configure_repository(target: str | None, force: bool = False):
 
     apply_github_repo_settings(slug)
     apply_branch_ruleset(slug)
-    install_commit_hook(repo_root)
+    install_hooks(repo_root, all_hooks=True)
     scaffold_templates(repo_root, force=force)
 
     print()
@@ -644,7 +768,7 @@ def create_repository(
 
     # Core DevOps scaffolds
     scaffold_templates(path, force=True)
-    install_commit_hook(path)
+    install_hooks(path, all_hooks=True)
 
     # Initial commit
     run_cmd(["git", "add", "."], cwd=path)
@@ -673,12 +797,12 @@ def print_templates():
     for name, desc in templates.items():
         print(f"  {CYAN}{name:<12}{RESET} {desc}")
     print(f"\n{BOLD}Usage Example:{RESET}")
-    print("  gh-standardise create my-api --type python --public -d 'My Python service'\n")
+    print("  repokit create my-api --type python --public -d 'My Python service'\n")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="gh-standardise",
+        prog="repokit",
         description="Automate GitHub repository DevOps and Git hygiene standards.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -687,19 +811,45 @@ def main():
     create_parser = subparsers.add_parser("create", help="Create a new standardised GitHub repo")
     create_parser.add_argument("name", help="Repository name")
     create_parser.add_argument("-d", "--description", default="", help="Repository description")
-    create_parser.add_argument("-t", "--type", choices=["python", "java", "typescript", "bash"], default=None, help="Solution archetype template")
-    create_parser.add_argument("--public", action="store_true", help="Create as public repository (default: private)")
+    create_parser.add_argument(
+        "-t",
+        "--type",
+        choices=["python", "java", "typescript", "bash"],
+        default=None,
+        help="Solution archetype template",
+    )
+    create_parser.add_argument(
+        "--public", action="store_true", help="Create as public repository (default: private)"
+    )
     create_parser.add_argument("--path", help="Local directory path (default: ./{name})")
 
     # configure
     config_parser = subparsers.add_parser("configure", help="Apply standards to an existing repository")
-    config_parser.add_argument("path", nargs="?", default=None, help="Path to repo directory (default: current directory)")
-    config_parser.add_argument("-f", "--force", action="store_true", help="Overwrite existing templates")
+    config_parser.add_argument(
+        "path", nargs="?", default=None, help="Path to repo directory (default: current directory)"
+    )
+    config_parser.add_argument(
+        "-f", "--force", action="store_true", help="Overwrite existing templates"
+    )
 
     # audit
     audit_parser = subparsers.add_parser("audit", help="Audit repository compliance against standards")
-    audit_parser.add_argument("path", nargs="?", default=None, help="Path to repo directory (default: current directory)")
-    audit_parser.add_argument("-t", "--type", choices=["python", "java", "typescript", "bash"], default=None, help="Specific archetype to verify")
+    audit_parser.add_argument(
+        "path", nargs="?", default=None, help="Path to repo directory (default: current directory)"
+    )
+    audit_parser.add_argument(
+        "-t",
+        "--type",
+        choices=["python", "java", "typescript", "bash"],
+        default=None,
+        help="Specific archetype to verify",
+    )
+    audit_parser.add_argument(
+        "--local", action="store_true", help="Audit local repository structure only (offline)"
+    )
+    audit_parser.add_argument(
+        "--remote", action="store_true", help="Audit remote GitHub settings only"
+    )
 
     # templates
     subparsers.add_parser("templates", help="List available solution archetype templates")
@@ -707,8 +857,13 @@ def main():
     # hook
     hook_parser = subparsers.add_parser("hook", help="Git hooks management")
     hook_sub = hook_parser.add_subparsers(dest="hook_command", required=True)
-    hook_install = hook_sub.add_parser("install", help="Install Conventional Commits commit-msg hook")
-    hook_install.add_argument("path", nargs="?", default=None, help="Path to repo directory (default: current directory)")
+    hook_install = hook_sub.add_parser("install", help="Install Conventional Commits and pre-commit hooks")
+    hook_install.add_argument(
+        "path", nargs="?", default=None, help="Path to repo directory (default: current directory)"
+    )
+    hook_install.add_argument(
+        "--all", action="store_true", help="Install all git hooks (commit-msg and pre-commit)"
+    )
 
     args = parser.parse_args()
 
@@ -727,7 +882,14 @@ def main():
         if not repo_root:
             log_error("Not inside a git repository.")
             sys.exit(1)
-        audit_repository(repo_root, archetype=args.type)
+        passed = audit_repository(
+            repo_root,
+            archetype=args.type,
+            local_only=args.local,
+            remote_only=args.remote,
+        )
+        if not passed:
+            sys.exit(1)
     elif args.command == "templates":
         print_templates()
     elif args.command == "hook" and args.hook_command == "install":
@@ -735,7 +897,11 @@ def main():
         if not repo_root:
             log_error("Not inside a git repository.")
             sys.exit(1)
-        install_commit_hook(repo_root)
+        if args.all:
+            install_hooks(repo_root, all_hooks=True)
+        else:
+            install_commit_hook(repo_root)
+            log_info("Tip: Run 'repokit hook install --all' to also install the pre-commit audit hook.")
 
 
 if __name__ == "__main__":
