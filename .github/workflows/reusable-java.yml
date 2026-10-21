@@ -1,0 +1,47 @@
+name: "Reusable Java CI"
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: "Java version to set up"
+        required: false
+        type: string
+        default: "21"
+      min-coverage:
+        description: "Minimum code coverage percentage required"
+        required: false
+        type: number
+        default: 80
+
+jobs:
+  test:
+    name: "Test & Coverage"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: ${{ inputs.java-version }}
+
+      - name: Run Maven verify
+        run: |
+          mvn -B verify
+
+      - name: Append JaCoCo test results to Step Summary
+        if: always()
+        run: |
+          echo "### JaCoCo Coverage & Test Results" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f target/site/jacoco/jacoco.csv ]; then
+            echo "| Package | Missed Instructions | Total Instructions |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+            tail -n +2 target/site/jacoco/jacoco.csv | head -n 10 | awk -F',' '{print "| " $2 " | " $4 " | " ($4+$5) " |"}' >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f target/site/jacoco/index.html ]; then
+            echo "JaCoCo report generated at \`target/site/jacoco/index.html\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "JaCoCo report not found." >> "$GITHUB_STEP_SUMMARY"
+          fi

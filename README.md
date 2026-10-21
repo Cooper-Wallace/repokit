@@ -1,7 +1,7 @@
-# gh-standardise
+# repokit: Enterprise Repository DevOps, Archetypes & Governance
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://github.com/Cooper-Wallace/gh-standardise/actions/workflows/test.yml/badge.svg)](https://github.com/Cooper-Wallace/gh-standardise/actions/workflows/test.yml)
+[![Tests](https://github.com/Cooper-Wallace/repokit/actions/workflows/test.yml/badge.svg)](https://github.com/Cooper-Wallace/repokit/actions/workflows/test.yml)
 [![Conventional Commits](https://img.shields.io/badge/Conventional%20Commits-1.0.0-yellow.svg)](https://conventionalcommits.org)
 
 An opinionated developer CLI to automate repository DevOps governance, branch protection, and Git hygiene standards across GitHub accounts and portfolio projects.
@@ -12,7 +12,7 @@ An opinionated developer CLI to automate repository DevOps governance, branch pr
 
 For solo developers, engineers, and researchers, pushing directly to `main` without gatekeeping or standardized commit history is a DevOps anti-pattern. While trunk-based commits offer fast prototyping, a disciplined Git history signals engineering maturity, facilitates automated changelog generation, and enables effortless cherry-picking and debugging.
 
-`gh-standardise` bridges this gap: it enforces workplace-grade branch protection and Conventional Commit hygiene while keeping solo workflows lightweight and frictionless.
+`repokit` bridges this gap: it enforces workplace-grade branch protection and Conventional Commit hygiene while keeping solo workflows lightweight and frictionless.
 
 ---
 
@@ -26,15 +26,28 @@ For solo developers, engineers, and researchers, pushing directly to `main` with
 - **Branch Protection via GitHub Rulesets**:
   - Restricts direct pushes and force pushes to the default branch (`main`).
   - Requires Pull Requests for merging code.
+  - Requires CI status checks (`validate-pr` and `ci`) before merging.
   - Sets required approving reviews to `0` so solo developers are never blocked.
 - **Client-Side Git Hooks**:
   - Installs an executable `.git/hooks/commit-msg` hook that validates commits locally before they are made.
+  - Installs an executable `.git/hooks/pre-commit` hook that audits repository structure before commits.
 - **Automated CI Quality Gates**:
   - Scaffolds `.github/workflows/semantic-pr.yml` to ensure PR titles strictly adhere to Conventional Commits.
 - **Standardised Scaffolding**:
   - Scaffolds structured PR templates (`.github/pull_request_template.md`), `.gitignore`, and portfolio-ready documentation.
-- **10-Point Audit Engine**:
-  - Audits existing repositories and produces an instant compliance report.
+- **Multi-Mode Audit Engine**:
+  - Audits existing repositories with offline local structure checks (`--local`, <30ms) or full remote GitHub API checks (`--remote`).
+
+---
+
+## Ecosystem Integration
+
+`gh-standardise` acts as **Layer 3 (Remote DevOps Governance)** within the 4-layer modular workstation stack:
+
+- **Layer 0 (`riced-kubuntu-os`)**: Kubuntu OS, KDE Plasma 6 desktop configuration, and hardware pipelines.
+- **Layer 1 (`workstation-setup`)**: Cross-platform developer toolchains (`uv`, `node`/`fnm`, `rustup`) and shell environments across Linux, macOS, and Windows.
+- **Layer 2 (`antigravity-standardise`)**: AI pair programmer harness permissions, global agent directives (`AGENTS.md`), MCP servers, and autonomous workflows.
+- **Layer 3 (`gh-standardise`)**: Remote GitHub repository rulesets, squash-and-merge enforcement, and semantic PR CI quality gates.
 
 ---
 
@@ -42,8 +55,8 @@ For solo developers, engineers, and researchers, pushing directly to `main` with
 
 ### Quick Install (Symlink to `~/.local/bin`)
 ```bash
-git clone https://github.com/Cooper-Wallace/gh-standardise.git ~/Projects/gh-standardise
-cd ~/Projects/gh-standardise
+git clone https://github.com/Cooper-Wallace/repokit.git ~/Projects/repokit
+cd ~/Projects/repokit
 bash install.sh
 ```
 
@@ -61,13 +74,19 @@ export PATH="$HOME/.local/bin:$PATH"
 ## Commands & Usage
 
 ### 1. Audit an Existing Repository
-Check a repository against the 10-point standard:
+Check a repository against DevOps and structural standards:
 ```bash
-# In the repository directory:
-gh-standardise audit
+# In the repository directory (runs local + remote audit):
+repokit audit
+
+# Run local offline audit only (<30ms, no GitHub API calls):
+repokit audit --local
+
+# Run remote GitHub settings audit only:
+repokit audit --remote
 
 # Or specify a target path:
-gh-standardise audit /path/to/project
+repokit audit /path/to/project
 ```
 
 Example audit output:
@@ -76,6 +95,7 @@ Auditing Repository Standards: /home/cooper/Projects/riced-kubuntu-os
 
 GitHub Repository: Cooper-Wallace/riced-kubuntu-os
 
+GitHub Remote Governance Standards:
   ✔ Squash & Merge Enabled
   ✔ Merge Commits Disabled
   ✔ Rebase Commits Disabled
@@ -83,29 +103,32 @@ GitHub Repository: Cooper-Wallace/riced-kubuntu-os
   ✔ Squash Commit Title set to PR_TITLE
   ✔ Squash Commit Message set to PR_BODY
   ✔ Default Branch Protection Ruleset Active
-  ✔ Local Conventional Commit Hook Installed
+
+Local Repository Standards:
+  ✔ Local Conventional Commit Hook Installed (.git/hooks/commit-msg)
+  ✔ Local Pre-commit Hook Installed (.git/hooks/pre-commit)
   ✔ Pull Request Template (.github/pull_request_template.md)
-  ✔ Semantic PR CI Workflow (.github/workflows/semantic-pr.yml)
+  ✔ CI / Semantic PR Workflow (.github/workflows/semantic-pr.yml or ci.yml)
 
 [SUCCESS] All repository standards are strictly satisfied!
 ```
 
 ---
 
-### 2. Apply Standards to an Existing Repository
+## 2. Apply Standards to an Existing Repository
 Apply GitHub API merge settings, branch protection rulesets, local hooks, and templates:
 ```bash
 cd /path/to/my-existing-project
-gh-standardise configure
+repokit configure
 ```
 * Use `-f` / `--force` to overwrite existing PR templates or workflows.
 
 ---
 
-### 3. Solution Archetypes & Scaffolding
+## 3. Solution Archetypes & Scaffolding
 List available project structure archetypes:
 ```bash
-gh-standardise templates
+repokit templates
 ```
 
 Supported archetypes:
@@ -116,29 +139,33 @@ Supported archetypes:
 
 ---
 
-### 4. Create a Brand New Standardised Repository
+## 4. Create a Brand New Standardised Repository
 Create a new repository on GitHub, scaffold the selected solution archetype, set up initial commit, push to `main`, and apply branch protection:
 
 ```bash
 # Create a Python package
-gh-standardise create my-python-pkg --type python --public -d "Modern Python data processing package"
+repokit create my-python-pkg --type python --public -d "Modern Python data processing package"
 
 # Create a Java REST API
-gh-standardise create auth-service --type java --public -d "Spring Boot authentication service"
+repokit create auth-service --type java --public -d "Spring Boot authentication service"
 
 # Create a TypeScript frontend
-gh-standardise create dashboard-ui --type typescript --public -d "Real-time metrics frontend"
+repokit create dashboard-ui --type typescript --public -d "Real-time metrics frontend"
 
 # Create a standalone Bash CLI utility
-gh-standardise create sys-monitor --type bash --public -d "System health monitor CLI"
+repokit create sys-monitor --type bash --public -d "System health monitor CLI"
 ```
 
 ---
 
-### 5. Install Git Commit Hook Only
-To quickly install or repair the Conventional Commits hook on any local git repository:
+## 5. Install Git Hooks
+To quickly install or repair git hooks on any local repository:
 ```bash
-gh-standardise hook install
+# Install Conventional Commits commit-msg hook:
+repokit hook install
+
+# Install all hooks (commit-msg and pre-commit structural audit):
+repokit hook install --all
 ```
 
 ---

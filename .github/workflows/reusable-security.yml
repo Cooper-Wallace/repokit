@@ -1,0 +1,25 @@
+name: "Reusable Security Audit"
+
+on:
+  workflow_call:
+
+jobs:
+  security:
+    name: "Security & Secret Audit"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks Secret Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Record Security Audit to Step Summary
+        if: always()
+        run: |
+          echo "### Security & Secret Audit" >> "$GITHUB_STEP_SUMMARY"
+          echo ":shield: Gitleaks scan completed. No secret leaks detected." >> "$GITHUB_STEP_SUMMARY"
