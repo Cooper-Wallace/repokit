@@ -426,7 +426,11 @@ def apply_github_repo_settings(repo_slug: str) -> bool:
         return False
 
 
-def apply_branch_ruleset(repo_slug: str, default_branch: str = "~DEFAULT_BRANCH") -> bool:
+def apply_branch_ruleset(
+    repo_slug: str,
+    default_branch: str = "~DEFAULT_BRANCH",
+    required_checks: list[str] | None = None,
+) -> bool:
     log_info(f"Configuring default branch protection ruleset on {repo_slug}...")
     p = subprocess.run(
         ["gh", "api", f"repos/{repo_slug}/rulesets"],
@@ -443,6 +447,12 @@ def apply_branch_ruleset(repo_slug: str, default_branch: str = "~DEFAULT_BRANCH"
                     break
         except Exception:
             pass
+
+    if required_checks is None:
+        if repo_slug.endswith("/repokit") or repo_slug == "repokit":
+            required_checks = ["Test & Coverage", "Validate Conventional Commit PR Title"]
+        else:
+            required_checks = ["ci / Test & Coverage", "validate-pr / Validate Conventional Commit PR Title"]
 
     payload = {
         "name": "default-branch-protection",
@@ -474,8 +484,7 @@ def apply_branch_ruleset(repo_slug: str, default_branch: str = "~DEFAULT_BRANCH"
                     "strict_required_status_checks_policy": True,
                     "do_not_enforce_on_create": False,
                     "required_status_checks": [
-                        {"context": "Semantic PR Title Check / Validate Conventional Commit PR Title"},
-                        {"context": "ci / Test & Coverage"},
+                        {"context": ctx} for ctx in required_checks
                     ],
                 },
             },
