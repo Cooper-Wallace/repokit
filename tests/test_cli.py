@@ -369,35 +369,75 @@ class TestGovernanceAndQualityGates(unittest.TestCase):
 
     @patch.object(repokit.subprocess, "run")
     def test_apply_branch_ruleset_enforces_squash_and_status_checks(self, mock_run):
+        # 1. Hub repository scenario (Cooper-Wallace/repokit)
         mock_run.side_effect = [
             subprocess.CompletedProcess(args=[], returncode=0, stdout="[]", stderr=""),
             subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr=""),
         ]
 
-        res = repokit.apply_branch_ruleset("Cooper-Wallace/repokit")
-        self.assertTrue(res)
-
+        res_hub = repokit.apply_branch_ruleset("Cooper-Wallace/repokit")
+        self.assertTrue(res_hub)
         self.assertEqual(mock_run.call_count, 2)
-        _, post_kwargs = mock_run.call_args_list[1]
-        self.assertIn("input", post_kwargs)
-        payload = json.loads(post_kwargs["input"])
+        _, post_kwargs_hub = mock_run.call_args_list[1]
+        payload_hub = json.loads(post_kwargs_hub["input"])
 
-        # Check squash-only merge method in pull_request rule
-        pr_rule = next((r for r in payload["rules"] if r.get("type") == "pull_request"), None)
+        pr_rule = next((r for r in payload_hub["rules"] if r.get("type") == "pull_request"), None)
         self.assertIsNotNone(pr_rule, "pull_request rule must be in ruleset")
         self.assertEqual(pr_rule["parameters"].get("allowed_merge_methods"), ["squash"])
 
-        # Check required_status_checks rule
-        status_rule = next((r for r in payload["rules"] if r.get("type") == "required_status_checks"), None)
-        self.assertIsNotNone(status_rule, "required_status_checks rule must be in ruleset")
-        self.assertTrue(status_rule["parameters"].get("strict_required_status_checks_policy"))
-        self.assertFalse(status_rule["parameters"].get("do_not_enforce_on_create"))
+        status_rule_hub = next((r for r in payload_hub["rules"] if r.get("type") == "required_status_checks"), None)
+        self.assertIsNotNone(status_rule_hub, "required_status_checks rule must be in ruleset")
+        self.assertTrue(status_rule_hub["parameters"].get("strict_required_status_checks_policy"))
+        self.assertFalse(status_rule_hub["parameters"].get("do_not_enforce_on_create"))
 
-        expected_contexts = [
-            {"context": "Semantic PR Title Check / Validate Conventional Commit PR Title"},
-            {"context": "ci / Test & Coverage"},
+        expected_hub_contexts = [
+            {"context": "Test & Coverage"},
+            {"context": "Validate Conventional Commit PR Title"},
         ]
-        self.assertEqual(status_rule["parameters"].get("required_status_checks"), expected_contexts)
+        self.assertEqual(status_rule_hub["parameters"].get("required_status_checks"), expected_hub_contexts)
+
+        # 2. Consumer repository scenario (Cooper-Wallace/my-repo)
+        mock_run.reset_mock()
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="[]", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr=""),
+        ]
+
+        res_consumer = repokit.apply_branch_ruleset("Cooper-Wallace/my-repo")
+        self.assertTrue(res_consumer)
+        self.assertEqual(mock_run.call_count, 2)
+        _, post_kwargs_consumer = mock_run.call_args_list[1]
+        payload_consumer = json.loads(post_kwargs_consumer["input"])
+
+        status_rule_consumer = next((r for r in payload_consumer["rules"] if r.get("type") == "required_status_checks"), None)
+        self.assertIsNotNone(status_rule_consumer)
+        expected_consumer_contexts = [
+            {"context": "ci / Test & Coverage"},
+            {"context": "validate-pr / Validate Conventional Commit PR Title"},
+        ]
+        self.assertEqual(status_rule_consumer["parameters"].get("required_status_checks"), expected_consumer_contexts)
+
+        # 3. Explicit required_checks scenario
+        mock_run.reset_mock()
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="[]", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr=""),
+        ]
+
+        custom_checks = ["Custom / Test", "Custom / Lint"]
+        res_custom = repokit.apply_branch_ruleset("Cooper-Wallace/custom-repo", required_checks=custom_checks)
+        self.assertTrue(res_custom)
+        self.assertEqual(mock_run.call_count, 2)
+        _, post_kwargs_custom = mock_run.call_args_list[1]
+        payload_custom = json.loads(post_kwargs_custom["input"])
+
+        status_rule_custom = next((r for r in payload_custom["rules"] if r.get("type") == "required_status_checks"), None)
+        self.assertIsNotNone(status_rule_custom)
+        expected_custom_contexts = [
+            {"context": "Custom / Test"},
+            {"context": "Custom / Lint"},
+        ]
+        self.assertEqual(status_rule_custom["parameters"].get("required_status_checks"), expected_custom_contexts)
 
     @patch.object(repokit, "get_repo_slug")
     @patch.object(repokit, "run_cmd")
@@ -434,8 +474,8 @@ class TestGovernanceAndQualityGates(unittest.TestCase):
                                     "type": "required_status_checks",
                                     "parameters": {
                                         "required_status_checks": [
-                                            {"context": "Semantic PR Title Check / Validate Conventional Commit PR Title"},
-                                            {"context": "ci / Test & Coverage"},
+                                            {"context": "Test & Coverage"},
+                                            {"context": "Validate Conventional Commit PR Title"},
                                         ]
                                     },
                                 }
