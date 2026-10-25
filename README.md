@@ -200,6 +200,15 @@ Once your repository is standardised, your daily workflow remains fast and clean
 
 ---
 
+## Documentation
+
+Detailed architectural and operational documentation is available in [`docs/`](docs/):
+
+- [**Quality Gates Reference Architecture**](docs/quality-gates-reference.md): Complete specifications for the 3 progressive quality gates (Automated CI & Rulesets, Agent Review Verification, and Human Review & Manual Promotion).
+- [**Additive CI Runners Pattern**](docs/ci-additive-runners-pattern.md): Recommended architectural pattern for integrating project-specific CI jobs (type checking, container builds, simulation smoke tests) alongside centralized governance workflows without breaking ruleset check context matching or `repokit audit`.
+
+---
+
 ## Testing
 
 Run the unit test suite:
