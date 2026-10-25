@@ -2,6 +2,7 @@
 Tests for repokit CLI tool.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -9,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 # Add bin directory to sys.path so we can import helper functions directly
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -21,6 +23,7 @@ import importlib.util
 loader = importlib.machinery.SourceFileLoader("repokit", str(REPO_ROOT / "bin" / "repokit"))
 spec = importlib.util.spec_from_loader("repokit", loader)
 repokit = importlib.util.module_from_spec(spec)
+sys.modules["repokit"] = repokit
 loader.exec_module(repokit)
 
 PATTERN = repokit.COMMIT_PATTERN
@@ -340,6 +343,171 @@ class TestCLICommands(unittest.TestCase):
             self.assertEqual(res_hub.returncode, 0)
             self.assertIn("Central Reusable Workflows Hub Hosted (.github/workflows/reusable-*.yml)", res_hub.stdout)
             self.assertIn("All repository standards are strictly satisfied", res_hub.stdout)
+
+
+class TestGovernanceAndQualityGates(unittest.TestCase):
+    @patch.object(repokit.subprocess, "run")
+    def test_apply_github_repo_settings_disables_auto_merge(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="{}", stderr=""
+        )
+        res = repokit.apply_github_repo_settings("Cooper-Wallace/repokit")
+        self.assertTrue(res)
+
+        mock_run.assert_called_once()
+        call_args, call_kwargs = mock_run.call_args
+        self.assertIn("input", call_kwargs)
+        payload = json.loads(call_kwargs["input"])
+
+        self.assertIn("allow_auto_merge", payload)
+        self.assertIs(payload["allow_auto_merge"], False)
+        self.assertIs(payload["allow_squash_merge"], True)
+        self.assertIs(payload["allow_merge_commit"], False)
+        self.assertIs(payload["allow_rebase_merge"], False)
+        self.assertEqual(payload["squash_merge_commit_title"], "PR_TITLE")
+        self.assertEqual(payload["squash_merge_commit_message"], "PR_BODY")
+
+    @patch.object(repokit.subprocess, "run")
+    def test_apply_branch_ruleset_enforces_squash_and_status_checks(self, mock_run):
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="[]", stderr=""),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr=""),
+        ]
+
+        res = repokit.apply_branch_ruleset("Cooper-Wallace/repokit")
+        self.assertTrue(res)
+
+        self.assertEqual(mock_run.call_count, 2)
+        _, post_kwargs = mock_run.call_args_list[1]
+        self.assertIn("input", post_kwargs)
+        payload = json.loads(post_kwargs["input"])
+
+        # Check squash-only merge method in pull_request rule
+        pr_rule = next((r for r in payload["rules"] if r.get("type") == "pull_request"), None)
+        self.assertIsNotNone(pr_rule, "pull_request rule must be in ruleset")
+        self.assertEqual(pr_rule["parameters"].get("allowed_merge_methods"), ["squash"])
+
+        # Check required_status_checks rule
+        status_rule = next((r for r in payload["rules"] if r.get("type") == "required_status_checks"), None)
+        self.assertIsNotNone(status_rule, "required_status_checks rule must be in ruleset")
+        self.assertTrue(status_rule["parameters"].get("strict_required_status_checks_policy"))
+        self.assertFalse(status_rule["parameters"].get("do_not_enforce_on_create"))
+
+        expected_contexts = [
+            {"context": "Semantic PR Title Check / Validate Conventional Commit PR Title"},
+            {"context": "ci / Test & Coverage"},
+        ]
+        self.assertEqual(status_rule["parameters"].get("required_status_checks"), expected_contexts)
+
+    @patch.object(repokit, "get_repo_slug")
+    @patch.object(repokit, "run_cmd")
+    def test_audit_repository_remote_auto_merge_and_ruleset(self, mock_run_cmd, mock_slug):
+        mock_slug.return_value = "Cooper-Wallace/repokit"
+
+        # Case 1: All pass (auto_merge is False, ruleset has required status checks)
+        def mock_cmd_side_effect(cmd, check=True):
+            if cmd == ["gh", "api", "repos/Cooper-Wallace/repokit"]:
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=0,
+                    stdout=json.dumps({
+                        "allow_squash_merge": True,
+                        "allow_merge_commit": False,
+                        "allow_rebase_merge": False,
+                        "delete_branch_on_merge": True,
+                        "squash_merge_commit_title": "PR_TITLE",
+                        "squash_merge_commit_message": "PR_BODY",
+                        "allow_auto_merge": False,
+                    }),
+                    stderr="",
+                )
+            elif cmd == ["gh", "api", "repos/Cooper-Wallace/repokit/rulesets"]:
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=0,
+                    stdout=json.dumps([
+                        {
+                            "name": "default-branch-protection",
+                            "enforcement": "active",
+                            "rules": [
+                                {
+                                    "type": "required_status_checks",
+                                    "parameters": {
+                                        "required_status_checks": [
+                                            {"context": "Semantic PR Title Check / Validate Conventional Commit PR Title"},
+                                            {"context": "ci / Test & Coverage"},
+                                        ]
+                                    },
+                                }
+                            ],
+                        }
+                    ]),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="{}", stderr="")
+
+        mock_run_cmd.side_effect = mock_cmd_side_effect
+        self.assertTrue(repokit.audit_repository(REPO_ROOT, remote_only=True))
+
+        # Case 2: Failure if allow_auto_merge is True
+        def mock_cmd_auto_merge_true(cmd, check=True):
+            if cmd == ["gh", "api", "repos/Cooper-Wallace/repokit"]:
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=0,
+                    stdout=json.dumps({
+                        "allow_squash_merge": True,
+                        "allow_merge_commit": False,
+                        "allow_rebase_merge": False,
+                        "delete_branch_on_merge": True,
+                        "squash_merge_commit_title": "PR_TITLE",
+                        "squash_merge_commit_message": "PR_BODY",
+                        "allow_auto_merge": True,
+                    }),
+                    stderr="",
+                )
+            return mock_cmd_side_effect(cmd, check=check)
+
+        mock_run_cmd.side_effect = mock_cmd_auto_merge_true
+        self.assertFalse(repokit.audit_repository(REPO_ROOT, remote_only=True))
+
+        # Case 3: Failure if ruleset is missing required status checks
+        def mock_cmd_no_checks(cmd, check=True):
+            if cmd == ["gh", "api", "repos/Cooper-Wallace/repokit/rulesets"]:
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=0,
+                    stdout=json.dumps([
+                        {
+                            "name": "default-branch-protection",
+                            "enforcement": "active",
+                            "rules": [],
+                        }
+                    ]),
+                    stderr="",
+                )
+            return mock_cmd_side_effect(cmd, check=check)
+
+        mock_run_cmd.side_effect = mock_cmd_no_checks
+        self.assertFalse(repokit.audit_repository(REPO_ROOT, remote_only=True))
+
+    def test_pr_template_contains_quality_gates_checklist(self):
+        # Verify in-memory PR_TEMPLATE constant
+        self.assertIn("## Quality Gates & Sign-Off Checklist", repokit.PR_TEMPLATE)
+        self.assertIn("Gate 1: Automated Quality Gates", repokit.PR_TEMPLATE)
+        self.assertIn("Gate 2: Agent Review Verification", repokit.PR_TEMPLATE)
+        self.assertIn("Gate 3: Human Review & Manual Promotion", repokit.PR_TEMPLATE)
+        self.assertIn("never automated", repokit.PR_TEMPLATE)
+
+        # Verify synchronized .github/pull_request_template.md
+        template_file = REPO_ROOT / ".github" / "pull_request_template.md"
+        self.assertTrue(template_file.exists(), ".github/pull_request_template.md must exist")
+        content = template_file.read_text(encoding="utf-8")
+        self.assertIn("## Quality Gates & Sign-Off Checklist", content)
+        self.assertIn("Gate 1: Automated Quality Gates", content)
+        self.assertIn("Gate 2: Agent Review Verification", content)
+        self.assertIn("Gate 3: Human Review & Manual Promotion", content)
+        self.assertIn("never automated", content)
 
 
 if __name__ == "__main__":

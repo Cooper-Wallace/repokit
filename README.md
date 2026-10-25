@@ -23,10 +23,11 @@ For solo developers, engineers, and researchers, pushing directly to `main` with
   - Configures squash commit titles to default to **`PR_TITLE`** and bodies to **`PR_BODY`** (ensuring clean history on `main`).
   - Enables **automatic branch deletion** after pull requests are merged.
   - Permits PR branches to be updated automatically from `main`.
+  - Disables GitHub **auto-merge** to guarantee a human review and manual promotion gate.
 - **Branch Protection via GitHub Rulesets**:
   - Restricts direct pushes and force pushes to the default branch (`main`).
-  - Requires Pull Requests for merging code.
-  - Requires CI status checks (`validate-pr` and `ci`) before merging.
+  - Requires Pull Requests for merging code with squash-only merge method.
+  - Requires CI status checks (`Semantic PR Title Check / Validate Conventional Commit PR Title` and `ci / Test & Coverage`) before merging.
   - Sets required approving reviews to `0` so solo developers are never blocked.
 - **Client-Side Git Hooks**:
   - Installs an executable `.git/hooks/commit-msg` hook that validates commits locally before they are made.
@@ -102,7 +103,9 @@ GitHub Remote Governance Standards:
   ✔ Auto-Delete Head Branches on Merge
   ✔ Squash Commit Title set to PR_TITLE
   ✔ Squash Commit Message set to PR_BODY
+  ✔ Auto-Merge Disabled (Human Gate)
   ✔ Default Branch Protection Ruleset Active
+  ✔ Branch Ruleset Enforces Required Status Checks
 
 Local Repository Standards:
   ✔ Local Conventional Commit Hook Installed (.git/hooks/commit-msg)
@@ -187,11 +190,22 @@ Once your repository is standardised, your daily workflow remains fast and clean
    git push -u origin feat/laser-filter
    gh pr create --fill
    ```
-4. **Review & Merge**:
-   ```bash
-   gh pr checks
-   gh pr merge --squash --delete-branch
-   ```
+4. **Review Quality Gates & Manually Merge**:
+   - Check status of CI quality gates and semantic PR validation:
+     ```bash
+     gh pr checks
+     ```
+   - Complete the Quality Gates & Sign-Off Checklist on the PR (automated CI, agent review verification, and human review).
+   - Manually squash-merge the Pull Request via the GitHub web UI once all quality gates pass. Automated merging (`gh pr merge`) is intentionally disallowed to preserve human gatekeeping.
+
+---
+
+## Documentation
+
+Detailed architectural and operational documentation is available in [`docs/`](docs/):
+
+- [**Quality Gates Reference Architecture**](docs/quality-gates-reference.md): Complete specifications for the 3 progressive quality gates (Automated CI & Rulesets, Agent Review Verification, and Human Review & Manual Promotion).
+- [**Additive CI Runners Pattern**](docs/ci-additive-runners-pattern.md): Recommended architectural pattern for integrating project-specific CI jobs (type checking, container builds, simulation smoke tests) alongside centralized governance workflows without breaking ruleset check context matching or `repokit audit`.
 
 ---
 
