@@ -18,12 +18,17 @@
 
 ## Verification & Testing
 <!-- Detail the testing performed to verify this change. -->
-- [ ] Automated tests pass (`python3 -m unittest discover tests`)
+- [ ] Automated tests pass (`pytest`, `mvn test`, `npm test`, etc.)
 - [ ] Code formatting & linting checks pass
-- [ ] Manual test verification (include details/logs below)
+- [ ] Manual test / simulation verification (include details/logs below)
 
 **Test Details:**
 <!-- Details or output from testing -->
+
+## Quality Gates & Sign-Off Checklist
+- [ ] **Gate 1: Automated Quality Gates** (All CI checks pass: `ci / Test & Coverage`, `Semantic PR Title Check`)
+- [ ] **Gate 2: Agent Review Verification** (Adversarial diff review conducted; no unresolved warnings, regressions, or security leaks)
+- [ ] **Gate 3: Human Review & Manual Promotion** (PR reviewed by human developer; merge must only be triggered manually in the GitHub UI, never automated)
 
 ## Pre-Merge Checklist
 - [ ] PR title follows [Conventional Commits](https://www.conventionalcommits.org/) (e.g. `feat(nav): add laser filter`)
