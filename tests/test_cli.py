@@ -667,6 +667,66 @@ class TestGovernanceAndQualityGates(unittest.TestCase):
             self.assertIn("All repository standards are strictly satisfied", res_guarded.stdout)
             self.assertTrue(repokit.audit_repository(p, local_only=True))
 
+    def test_reusable_bash_workflow_shellcheck_shebang_filtering(self):
+        # 1. Verify workflow file contents
+        workflow_file = REPO_ROOT / ".github" / "workflows" / "reusable-bash.yml"
+        self.assertTrue(workflow_file.exists(), ".github/workflows/reusable-bash.yml must exist")
+        content = workflow_file.read_text(encoding="utf-8")
+        self.assertIn("shellcheck -x", content)
+        self.assertIn("^#!/(usr/)?bin/(env )?(ba|da|k)?sh", content)
+        self.assertIn("shopt -s globstar nullglob", content)
+
+        # 2. Validate bash filtering snippet behavior with a mock directory structure
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            (p / "bin").mkdir(parents=True, exist_ok=True)
+            (p / "scripts" / "sub").mkdir(parents=True, exist_ok=True)
+            (p / "lib" / "nested").mkdir(parents=True, exist_ok=True)
+
+            # Valid files that should be included
+            (p / "bin" / "tool.sh").write_text("#!/bin/sh\necho tool\n", encoding="utf-8")
+            (p / "bin" / "cli_tool").write_text("#!/usr/bin/env bash\necho cli\n", encoding="utf-8")
+            (p / "scripts" / "sub" / "helper.sh").write_text("#!/bin/bash\necho helper\n", encoding="utf-8")
+            (p / "lib" / "nested" / "library.sh").write_text("lib_func() { :; }\n", encoding="utf-8")
+            (p / "root_script.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+            # Non-shell files that must be excluded
+            (p / "bin" / "python_tool").write_text("#!/usr/bin/env python3\nprint('hello')\n", encoding="utf-8")
+            (p / "bin" / "compiled_binary").write_bytes(b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+            (p / "scripts" / "notes.txt").write_text("just documentation\n", encoding="utf-8")
+            (p / "bin" / "node_tool").write_text("#!/usr/bin/env node\nconsole.log(1)\n", encoding="utf-8")
+
+            # Run the exact bash filtering logic
+            bash_snippet = (
+                "shopt -s globstar nullglob\n"
+                "FILES_TO_CHECK=()\n"
+                "for f in bin/* *.sh scripts/**/*.sh lib/**/*.sh; do\n"
+                "  if [ -f \"$f\" ]; then\n"
+                "    if [[ \"$f\" == *.sh ]] || head -n 1 \"$f\" 2>/dev/null | grep -qE '^#!/(usr/)?bin/(env )?(ba|da|k)?sh'; then\n"
+                "      FILES_TO_CHECK+=(\"$f\")\n"
+                "    fi\n"
+                "  fi\n"
+                "done\n"
+                "for script in \"${FILES_TO_CHECK[@]}\"; do\n"
+                "  echo \"$script\"\n"
+                "done\n"
+            )
+            res = subprocess.run(["bash", "-c", bash_snippet], cwd=p, capture_output=True, text=True, check=True)
+            matched_files = set(res.stdout.strip().splitlines())
+
+            expected_files = {
+                "bin/tool.sh",
+                "bin/cli_tool",
+                "scripts/sub/helper.sh",
+                "lib/nested/library.sh",
+                "root_script.sh",
+            }
+            self.assertEqual(matched_files, expected_files)
+            self.assertNotIn("bin/python_tool", matched_files)
+            self.assertNotIn("bin/compiled_binary", matched_files)
+            self.assertNotIn("scripts/notes.txt", matched_files)
+            self.assertNotIn("bin/node_tool", matched_files)
+
 
 if __name__ == "__main__":
     unittest.main()
