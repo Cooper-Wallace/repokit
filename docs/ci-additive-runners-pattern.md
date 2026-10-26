@@ -27,6 +27,7 @@ When a caller workflow declares a job invoking a reusable workflow:
 ```yaml
 jobs:
   validate-pr:
+    if: github.event_name == 'pull_request'
     uses: Cooper-Wallace/repokit/.github/workflows/semantic-pr.yml@main
 
   ci:
@@ -77,6 +78,7 @@ jobs:
   # Standard repokit Governance Jobs (MANDATORY)
   # -------------------------------------------------------------
   validate-pr:
+    if: github.event_name == 'pull_request'
     uses: Cooper-Wallace/repokit/.github/workflows/semantic-pr.yml@main
 
   ci:

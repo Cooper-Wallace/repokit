@@ -549,6 +549,35 @@ class TestGovernanceAndQualityGates(unittest.TestCase):
         self.assertIn("Gate 3: Human Review & Manual Promotion", content)
         self.assertIn("never automated", content)
 
+    def test_semantic_pr_workflow_push_guard(self):
+        # Verify in-memory WORKFLOW_SEMANTIC_PR constant
+        self.assertIn(
+            "if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'",
+            repokit.WORKFLOW_SEMANTIC_PR,
+        )
+        self.assertIn("workflow_call:", repokit.WORKFLOW_SEMANTIC_PR)
+
+        # Verify .github/workflows/semantic-pr.yml
+        workflow_file = REPO_ROOT / ".github" / "workflows" / "semantic-pr.yml"
+        self.assertTrue(workflow_file.exists())
+        content = workflow_file.read_text(encoding="utf-8")
+        self.assertIn(
+            "if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'",
+            content,
+        )
+        self.assertIn("workflow_call:", content)
+
+    def test_archetype_ci_workflow_has_semantic_pr_push_guard(self):
+        for arch in ["bash", "python", "java", "typescript"]:
+            ci_template = REPO_ROOT / "templates" / arch / ".github" / "workflows" / "ci.yml"
+            self.assertTrue(ci_template.exists(), f"CI template for {arch} must exist")
+            content = ci_template.read_text(encoding="utf-8")
+            self.assertIn(
+                "if: github.event_name == 'pull_request'",
+                content,
+                f"CI template for {arch} must guard validate-pr with if: github.event_name == 'pull_request'",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
