@@ -578,6 +578,95 @@ class TestGovernanceAndQualityGates(unittest.TestCase):
                 f"CI template for {arch} must guard validate-pr with if: github.event_name == 'pull_request'",
             )
 
+    def test_patch_ci_workflow_pr_guard(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ci_file = Path(tmpdir) / "ci.yml"
+            initial_content = (
+                "name: CI\n\n"
+                "on:\n  pull_request:\n  push:\n\n"
+                "jobs:\n"
+                "  validate-pr:\n"
+                "    uses: Cooper-Wallace/repokit/.github/workflows/semantic-pr.yml@main\n\n"
+                "  test:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - run: pytest\n"
+            )
+            ci_file.write_text(initial_content, encoding="utf-8")
+
+            # First run: should inject guard and return True
+            res = repokit.patch_ci_workflow_pr_guard(ci_file)
+            self.assertTrue(res)
+
+            patched_content = ci_file.read_text(encoding="utf-8")
+            self.assertIn("validate-pr:\n    if: github.event_name == 'pull_request'\n", patched_content)
+            self.assertIn("  test:\n    runs-on: ubuntu-latest\n", patched_content)
+            self.assertIn("uses: Cooper-Wallace/repokit/.github/workflows/semantic-pr.yml@main", patched_content)
+
+            # Second run: already guarded, must be idempotent and return False
+            res2 = repokit.patch_ci_workflow_pr_guard(ci_file)
+            self.assertFalse(res2)
+            self.assertEqual(ci_file.read_text(encoding="utf-8"), patched_content)
+
+    def test_scaffold_archetype_ci_patches_existing_workflow(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir)
+            (repo_path / "pyproject.toml").write_text("[project]\nname='foo'\n")
+            ci_dir = repo_path / ".github" / "workflows"
+            ci_dir.mkdir(parents=True)
+            ci_file = ci_dir / "ci.yml"
+            custom_content = (
+                "name: Custom CI\n"
+                "jobs:\n"
+                "  validate-pr:\n"
+                "    uses: Cooper-Wallace/repokit/.github/workflows/semantic-pr.yml@main\n"
+                "  custom-job:\n"
+                "    runs-on: ubuntu-latest\n"
+            )
+            ci_file.write_text(custom_content, encoding="utf-8")
+
+            # Without --force, it should patch validate-pr and preserve custom-job
+            modified = repokit.scaffold_archetype_ci(repo_path, force=False)
+            self.assertTrue(modified)
+            content = ci_file.read_text(encoding="utf-8")
+            self.assertIn("if: github.event_name == 'pull_request'", content)
+            self.assertIn("custom-job:", content)
+
+    def test_audit_ci_workflow_pr_guard(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=p, check=True, capture_output=True)
+            subprocess.run([*BIN_CMD, "hook", "install", "--all", str(p)], check=True, capture_output=True)
+            (p / ".github").mkdir(parents=True, exist_ok=True)
+            (p / ".github" / "pull_request_template.md").write_text("## Summary\n")
+            (p / ".github" / "workflows").mkdir(parents=True, exist_ok=True)
+            (p / "src").mkdir(parents=True, exist_ok=True)
+
+            ci_file = p / ".github" / "workflows" / "ci.yml"
+
+            # Case 1: validate-pr without guard -> audit should report False
+            ci_file.write_text(
+                "name: CI\njobs:\n  validate-pr:\n    uses: Cooper-Wallace/repokit/.github/workflows/semantic-pr.yml@main\n"
+                "  ci:\n    uses: Cooper-Wallace/repokit/.github/workflows/reusable-python.yml@main\n"
+            )
+            res_no_guard = subprocess.run([*BIN_CMD, "audit", str(p), "--local"], capture_output=True, text=True)
+            self.assertNotEqual(res_no_guard.returncode, 0)
+            self.assertIn("CI Workflow PR Event Guard (skips PR check on main push)", res_no_guard.stdout)
+            self.assertIn("✘", res_no_guard.stdout)
+            self.assertFalse(repokit.audit_repository(p, local_only=True))
+
+            # Case 2: validate-pr with guard -> audit should report True
+            ci_file.write_text(
+                "name: CI\njobs:\n  validate-pr:\n    if: github.event_name == 'pull_request'\n"
+                "    uses: Cooper-Wallace/repokit/.github/workflows/semantic-pr.yml@main\n"
+                "  ci:\n    uses: Cooper-Wallace/repokit/.github/workflows/reusable-python.yml@main\n"
+            )
+            res_guarded = subprocess.run([*BIN_CMD, "audit", str(p), "--local"], capture_output=True, text=True)
+            self.assertEqual(res_guarded.returncode, 0)
+            self.assertIn("CI Workflow PR Event Guard (skips PR check on main push)", res_guarded.stdout)
+            self.assertIn("All repository standards are strictly satisfied", res_guarded.stdout)
+            self.assertTrue(repokit.audit_repository(p, local_only=True))
+
 
 if __name__ == "__main__":
     unittest.main()

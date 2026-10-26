@@ -679,6 +679,7 @@ def audit_repository(
 
         has_pr_template = (repo_root / ".github" / "pull_request_template.md").exists()
 
+        ci_workflow_path = repo_root / ".github" / "workflows" / "ci.yml"
         is_governance_hub = (
             (repo_root / ".github" / "workflows" / "reusable-python.yml").exists()
             and (repo_root / "bin" / "repokit").exists()
@@ -687,7 +688,6 @@ def audit_repository(
             has_ci_workflow = (repo_root / ".github" / "workflows" / "test.yml").exists()
             ci_label = "Central Reusable Workflows Hub Hosted (.github/workflows/reusable-*.yml)"
         else:
-            ci_workflow_path = repo_root / ".github" / "workflows" / "ci.yml"
             has_ci_workflow = False
             if ci_workflow_path.exists():
                 try:
@@ -707,11 +707,26 @@ def audit_repository(
                 else "CI Workflow missing or not calling central repokit reusable workflows"
             )
 
+        has_pr_guard = is_governance_hub
+        if not is_governance_hub and ci_workflow_path.exists():
+            try:
+                ci_content = ci_workflow_path.read_text(encoding="utf-8")
+                if "validate-pr:" in ci_content:
+                    has_pr_guard = (
+                        "github.event_name == 'pull_request'" in ci_content
+                        or 'github.event_name == "pull_request"' in ci_content
+                    )
+                else:
+                    has_pr_guard = True
+            except Exception:
+                pass
+
         local_items = [
             ("Local Conventional Commit Hook Installed (.git/hooks/commit-msg)", has_hook),
             ("Local Pre-commit Hook Installed (.git/hooks/pre-commit)", has_pre_hook),
             ("Pull Request Template (.github/pull_request_template.md)", has_pr_template),
             (ci_label, has_ci_workflow),
+            ("CI Workflow PR Event Guard (skips PR check on main push)", has_pr_guard),
         ]
 
     all_passed = True
@@ -770,12 +785,41 @@ def audit_repository(
         return False
 
 
+def patch_ci_workflow_pr_guard(ci_file: Path) -> bool:
+    if not ci_file.exists():
+        return False
+    try:
+        content = ci_file.read_text(encoding="utf-8")
+    except Exception as e:
+        log_error(f"Failed to read {ci_file}: {e}")
+        return False
+
+    if (
+        "validate-pr:" in content
+        and "github.event_name == 'pull_request'" not in content
+        and 'github.event_name == "pull_request"' not in content
+    ):
+        new_content = re.sub(
+            r"(\n\s*validate-pr:\s*\n)(?!\s*if:)",
+            r"\1    if: github.event_name == 'pull_request'\n",
+            content,
+        )
+        if new_content != content:
+            ci_file.write_text(new_content, encoding="utf-8")
+            log_success("Patched existing CI workflow with PR event guard (.github/workflows/ci.yml)")
+            return True
+    return False
+
+
 def scaffold_archetype_ci(repo_root: Path, force: bool = False) -> bool:
     archetype = detect_archetype(repo_root)
+    target_ci = repo_root / ".github" / "workflows" / "ci.yml"
     if not archetype:
+        if target_ci.exists() and not force:
+            if patch_ci_workflow_pr_guard(target_ci):
+                return True
         return False
     template_ci = TEMPLATES_DIR / archetype / ".github" / "workflows" / "ci.yml"
-    target_ci = repo_root / ".github" / "workflows" / "ci.yml"
     if template_ci.exists() and (not target_ci.exists() or force):
         target_ci.parent.mkdir(parents=True, exist_ok=True)
         content = template_ci.read_text(encoding="utf-8")
@@ -784,6 +828,8 @@ def scaffold_archetype_ci(repo_root: Path, force: bool = False) -> bool:
         log_success("Scaffolded CI workflow calling central repokit workflows (.github/workflows/ci.yml)")
         return True
     elif target_ci.exists() and not force:
+        if patch_ci_workflow_pr_guard(target_ci):
+            return True
         log_info("CI workflow already exists (use --force to overwrite).")
         return False
     return False
