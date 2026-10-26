@@ -15,15 +15,18 @@ jobs:
         run: |
           echo "### ShellCheck Results" >> "$GITHUB_STEP_SUMMARY"
           if command -v shellcheck >/dev/null 2>&1; then
+            shopt -s globstar nullglob
             FILES_TO_CHECK=()
-            for f in bin/* *.sh; do
+            for f in bin/* *.sh scripts/**/*.sh lib/**/*.sh; do
               if [ -f "$f" ]; then
-                FILES_TO_CHECK+=("$f")
+                if [[ "$f" == *.sh ]] || head -n 1 "$f" 2>/dev/null | grep -qE '^#!/(usr/)?bin/(env )?(ba|da|k)?sh'; then
+                  FILES_TO_CHECK+=("$f")
+                fi
               fi
             done
             if [ ${#FILES_TO_CHECK[@]} -gt 0 ]; then
-              shellcheck "${FILES_TO_CHECK[@]}"
-              echo "ShellCheck verified ${#FILES_TO_CHECK[@]} script(s) cleanly." >> "$GITHUB_STEP_SUMMARY"
+              shellcheck -x "${FILES_TO_CHECK[@]}"
+              echo "ShellCheck verified ${#FILES_TO_CHECK[@]} script(s) cleanly (with -x source following)." >> "$GITHUB_STEP_SUMMARY"
             else
               echo "No shell scripts found to audit." >> "$GITHUB_STEP_SUMMARY"
             fi
