@@ -35,6 +35,14 @@ jobs:
         run: |
           npx tsc --noEmit
 
+      - name: Lint
+        run: |
+          npm run lint --if-present
+
       - name: Test with vitest coverage
         run: |
           npx vitest run --coverage --coverage.thresholds.lines=${{ inputs.min-coverage }} | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Build
+        run: |
+          npm run build --if-present
