@@ -1,3 +1,5 @@
+//go:build ignore
+
 package {{package_name}}
 
 import (

@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Package {{package_name}} provides the core domain logic for {{repo_name}}.
 package {{package_name}}
 
