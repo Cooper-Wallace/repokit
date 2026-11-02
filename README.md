@@ -67,7 +67,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ### Prerequisites
-- Python 3.10+
+- Go 1.23+
 - [GitHub CLI (`gh`)](https://cli.github.com/) authenticated via `gh auth login` with `repo` scope.
 
 ---
@@ -139,6 +139,7 @@ Supported archetypes:
 - **`java`**: Maven layered architecture (`controller`, `service`, `model`), `application.yml`, and JUnit 5 tests.
 - **`typescript`**: Vite + strict TypeScript app, modular components, and Vitest.
 - **`bash`**: Standalone CLI utility (`bin/` script, `install.sh`, and automated smoke tests).
+- **`go`**: Idiomatic Go standard library layout (`cmd/`, `internal/`), standard testing, and CI.
 
 ---
 
@@ -213,7 +214,7 @@ Detailed architectural and operational documentation is available in [`docs/`](d
 
 Run the unit test suite:
 ```bash
-python3 -m unittest discover tests -v
+go test -v ./...
 ```
 
 ---

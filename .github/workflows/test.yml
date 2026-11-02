@@ -15,11 +15,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          python-version: "3.11"
+          go-version: "1.23"
 
-      - name: Run repokit unit tests
-        run: |
-          python3 -m unittest discover tests -v
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run repokit tests with coverage
+        run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...

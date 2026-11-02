@@ -1,0 +1,54 @@
+name: "Reusable Go CI"
+
+on:
+  workflow_call:
+    inputs:
+      go-version:
+        description: "Go version to set up"
+        required: false
+        type: string
+        default: "1.23"
+      min-coverage:
+        description: "Minimum code coverage percentage required"
+        required: false
+        type: number
+        default: 80
+
+jobs:
+  test:
+    name: "Test & Coverage"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: true
+
+      - name: Run go vet
+        run: |
+          go vet ./...
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        continue-on-error: true
+        with:
+          version: latest
+
+      - name: Build packages
+        run: |
+          go build -v ./...
+
+      - name: Run tests with coverage gate
+        run: |
+          go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+          echo "### Go Coverage & Test Results" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          go tool cover -func=coverage.out | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          TOTAL_COV=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
+          echo "**Total Coverage:** ${TOTAL_COV}% (Threshold: ${{ inputs.min-coverage }}%)" >> "$GITHUB_STEP_SUMMARY"
+          awk -v cov="$TOTAL_COV" -v min="${{ inputs.min-coverage }}" 'BEGIN { if (cov + 0 < min + 0) { printf "Coverage %.1f%% is below minimum threshold %.1f%%\n", cov, min; exit 1 } }'

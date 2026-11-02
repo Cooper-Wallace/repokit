@@ -1,0 +1,27 @@
+# Binaries & build artifacts
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/{{repo_name}}
+
+# Test & coverage artifacts
+*.test
+*.out
+coverage.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# Environment & OS
+.env
+.DS_Store
+
+# IDEs
+.idea/
+.vscode/*
+!.vscode/settings.json
