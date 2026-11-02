@@ -1,0 +1,86 @@
+name: "Reusable TypeScript Release"
+
+on:
+  workflow_call:
+    inputs:
+      tag-name:
+        description: "Release tag name"
+        type: string
+        required: true
+      node-version:
+        description: "Node.js version to set up"
+        type: string
+        default: "20"
+        required: false
+      is-web-extension:
+        description: "Whether the project is a web extension"
+        type: boolean
+        default: false
+        required: false
+      dist-dir:
+        description: "Build output directory"
+        type: string
+        default: "dist"
+        required: false
+
+jobs:
+  release-typescript:
+    name: "Build & Publish TypeScript Release"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install dependencies
+        run: |
+          npm ci
+
+      - name: Build project
+        run: |
+          npm run build
+
+      - name: Package release assets and generate checksums
+        run: |
+          mkdir -p release-dist
+          REPO_NAME="${{ github.event.repository.name }}"
+          if [ -z "$REPO_NAME" ]; then
+            REPO_NAME="${GITHUB_REPOSITORY##*/}"
+          fi
+          DIST_DIR="${{ inputs.dist-dir }}"
+          TAG="${{ inputs.tag-name }}"
+
+          if [ "${{ inputs.is-web-extension }}" = "true" ]; then
+            ARCHIVE="${REPO_NAME}-extension-${TAG}.zip"
+            if [ -d "$DIST_DIR" ]; then
+              (cd "$DIST_DIR" && zip -r "../release-dist/${ARCHIVE}" .)
+            else
+              zip -r "release-dist/${ARCHIVE}" "$DIST_DIR"
+            fi
+            cd release-dist
+            sha256sum *.zip > checksums.txt
+          else
+            ARCHIVE="${REPO_NAME}-${TAG}.tar.gz"
+            if [ -d "$DIST_DIR" ]; then
+              tar -czf "release-dist/${ARCHIVE}" -C "$DIST_DIR" .
+            else
+              tar -czf "release-dist/${ARCHIVE}" "$DIST_DIR"
+            fi
+            cd release-dist
+            sha256sum *.tar.gz > checksums.txt
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag-name }}
+          files: |
+            release-dist/*

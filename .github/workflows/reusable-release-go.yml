@@ -1,0 +1,97 @@
+name: "Reusable Go Release"
+
+on:
+  workflow_call:
+    inputs:
+      tag-name:
+        description: "Release tag name"
+        type: string
+        required: true
+      go-version:
+        description: "Go version to set up"
+        type: string
+        default: "1.23"
+        required: false
+
+jobs:
+  release-go:
+    name: "Build & Publish Go Release"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: true
+
+      - name: Check Goreleaser configuration
+        id: check-goreleaser
+        run: |
+          if [ -f ".goreleaser.yaml" ] || [ -f ".goreleaser.yml" ]; then
+            echo "has_goreleaser=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_goreleaser=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run GoReleaser
+        if: steps.check-goreleaser.outputs.has_goreleaser == 'true'
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cross-compile Go binaries
+        if: steps.check-goreleaser.outputs.has_goreleaser != 'true'
+        run: |
+          mkdir -p dist
+          BIN_NAME="${GITHUB_REPOSITORY##*/}"
+
+          BUILD_PKG="."
+          if [ -d "cmd/${BIN_NAME}" ]; then
+            BUILD_PKG="./cmd/${BIN_NAME}"
+          elif [ -d "cmd" ]; then
+            FIRST_CMD=$(find cmd -mindepth 1 -maxdepth 1 -type d | head -n 1)
+            if [ -n "$FIRST_CMD" ]; then
+              BUILD_PKG="./$FIRST_CMD"
+            else
+              BUILD_PKG="./cmd"
+            fi
+          fi
+
+          TARGETS=(
+            "linux amd64"
+            "linux arm64"
+            "darwin amd64"
+            "darwin arm64"
+            "windows amd64"
+            "windows arm64"
+          )
+          for target in "${TARGETS[@]}"; do
+            read -r GOOS GOARCH <<< "$target"
+            EXT=""
+            if [ "$GOOS" = "windows" ]; then
+              EXT=".exe"
+            fi
+            OUT="dist/${BIN_NAME}-${GOOS}-${GOARCH}${EXT}"
+            echo "Building ${OUT} from ${BUILD_PKG}..."
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -ldflags="-s -w" -o "$OUT" "$BUILD_PKG"
+          done
+
+          cd dist
+          sha256sum * > checksums.txt
+
+      - name: Publish fallback GitHub Release
+        if: steps.check-goreleaser.outputs.has_goreleaser != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag-name }}
+          files: dist/*

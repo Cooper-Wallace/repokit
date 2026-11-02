@@ -1,0 +1,49 @@
+name: "Reusable Python Release"
+
+on:
+  workflow_call:
+    inputs:
+      tag-name:
+        description: "Release tag name"
+        type: string
+        required: true
+      python-version:
+        description: "Python version to set up"
+        type: string
+        default: "3.11"
+        required: false
+
+jobs:
+  release-python:
+    name: "Build & Publish Python Release"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build packages
+        run: |
+          uv build
+
+      - name: Compute checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag-name }}
+          files: dist/*

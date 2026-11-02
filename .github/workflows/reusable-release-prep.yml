@@ -1,0 +1,50 @@
+name: "Reusable Release Preparation"
+
+on:
+  workflow_call:
+    inputs:
+      release-type:
+        description: "Release type for release-please (e.g. simple, go, python, node)"
+        type: string
+        default: "simple"
+        required: false
+    outputs:
+      releases_created:
+        description: "Whether a release was created"
+        value: ${{ jobs.release-prep.outputs.releases_created }}
+      tag_name:
+        description: "Release tag name"
+        value: ${{ jobs.release-prep.outputs.tag_name }}
+      version:
+        description: "Release version"
+        value: ${{ jobs.release-prep.outputs.version }}
+      major:
+        description: "Major version"
+        value: ${{ jobs.release-prep.outputs.major }}
+      minor:
+        description: "Minor version"
+        value: ${{ jobs.release-prep.outputs.minor }}
+      patch:
+        description: "Patch version"
+        value: ${{ jobs.release-prep.outputs.patch }}
+
+jobs:
+  release-prep:
+    name: "Release Preparation"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+      major: ${{ steps.release.outputs.major }}
+      minor: ${{ steps.release.outputs.minor }}
+      patch: ${{ steps.release.outputs.patch }}
+    steps:
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          release-type: ${{ inputs.release-type }}
