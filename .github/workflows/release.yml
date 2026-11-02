@@ -1,64 +1,27 @@
-name: "Release Binaries"
+name: Release
 
 on:
   push:
-    tags:
-      - "v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag (e.g. v1.0.0)"
-        required: false
-        default: "v0.1.0"
+    branches:
+      - main
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
-  release:
-    name: "Build & Publish Release Binaries"
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+  release-please:
+    name: "Semantic Release Gate"
+    uses: ./.github/workflows/reusable-release-prep.yml
+    with:
+      release-type: "go"
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.23"
-          cache: true
-
-      - name: Cross-compile repokit and gh-repokit binaries
-        run: |
-          mkdir -p dist
-          TARGETS=(
-            "linux amd64"
-            "linux arm64"
-            "darwin amd64"
-            "darwin arm64"
-            "windows amd64"
-          )
-          for target in "${TARGETS[@]}"; do
-            read -r GOOS GOARCH <<< "$target"
-            EXT=""
-            if [ "$GOOS" = "windows" ]; then
-              EXT=".exe"
-            fi
-            OUT_REPOKIT="dist/repokit-${GOOS}-${GOARCH}${EXT}"
-            OUT_GH_EXT="dist/gh-repokit_${GOOS}-${GOARCH}${EXT}"
-            echo "Building ${OUT_REPOKIT} and ${OUT_GH_EXT}..."
-            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -ldflags="-s -w" -o "$OUT_REPOKIT" ./cmd/repokit
-            cp "$OUT_REPOKIT" "$OUT_GH_EXT"
-          done
-          cd dist
-          sha256sum repokit-* gh-repokit_* > checksums.txt
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name != 'main' && github.ref_name || inputs.tag || 'v0.1.0' }}
-          generate_release_notes: true
-          files: |
-            dist/repokit-*
-            dist/gh-repokit_*
-            dist/checksums.txt
+  package-release:
+    name: "Package & Upload Assets"
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    uses: ./.github/workflows/reusable-release-go.yml
+    with:
+      tag-name: ${{ needs.release-please.outputs.tag_name }}
+      go-version: "1.23"
+    secrets: inherit

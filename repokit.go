@@ -160,6 +160,25 @@ jobs:
           requireScope: false
 `
 
+	GenericReleaseWorkflow = `name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: "Semantic Release Gate"
+    uses: {{governance_slug}}/.github/workflows/reusable-release-prep.yml@main
+    with:
+      release-type: "simple"
+`
+
 	DefaultGitignore = `# OS Artifacts
 .DS_Store
 *~
@@ -412,6 +431,7 @@ func AuditArchetypeStructure(repoRoot string, templateName string) []CheckItem {
 			{Label: "Go: 'go.mod' module definition", Passed: fileExists(filepath.Join(repoRoot, "go.mod"))},
 			{Label: "Go: 'cmd/' directory", Passed: isDir(filepath.Join(repoRoot, "cmd"))},
 			{Label: "Go: 'internal/' directory or package layout", Passed: isDir(filepath.Join(repoRoot, "internal")) || isDir(filepath.Join(repoRoot, "pkg")) || isDir(filepath.Join(repoRoot, "cmd"))},
+			{Label: "Go: '.goreleaser.yaml' release config", Passed: fileExists(filepath.Join(repoRoot, ".goreleaser.yaml")) || fileExists(filepath.Join(repoRoot, ".goreleaser.yml"))},
 		}
 	case "python":
 		checks = []CheckItem{
@@ -831,6 +851,53 @@ func ScaffoldArchetypeCI(repoRoot string, force bool) (bool, error) {
 	return false, nil
 }
 
+func ScaffoldReleaseWorkflow(repoRoot string, force bool) (bool, error) {
+	targetRelease := filepath.Join(repoRoot, ".github", "workflows", "release.yml")
+	if fileExists(targetRelease) && !force {
+		LogInfo("Release workflow already exists (use --force to overwrite).")
+		return false, nil
+	}
+
+	archetype := DetectArchetype(repoRoot)
+	var content string
+	if archetype != "" {
+		templatePath := fmt.Sprintf("templates/%s/.github/workflows/release.yml", archetype)
+		if data, err := TemplatesFS.ReadFile(templatePath); err == nil {
+			content = string(data)
+		}
+	}
+	if content == "" {
+		content = GenericReleaseWorkflow
+	}
+
+	content = strings.ReplaceAll(content, "{{governance_slug}}", DefaultGovernanceRepo)
+	if err := os.MkdirAll(filepath.Dir(targetRelease), 0755); err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(targetRelease, []byte(content), 0644); err != nil {
+		return false, err
+	}
+	LogSuccess("Scaffolded release workflow (.github/workflows/release.yml)")
+
+	if archetype == "go" {
+		targetGoreleaser := filepath.Join(repoRoot, ".goreleaser.yaml")
+		if !fileExists(targetGoreleaser) || force {
+			data, err := TemplatesFS.ReadFile("templates/go/.goreleaser.yaml")
+			if err == nil {
+				gContent := string(data)
+				gContent = strings.ReplaceAll(gContent, "{{repo_name}}", filepath.Base(repoRoot))
+				gContent = strings.ReplaceAll(gContent, "{{governance_slug}}", DefaultGovernanceRepo)
+				if err := os.WriteFile(targetGoreleaser, []byte(gContent), 0644); err != nil {
+					return false, err
+				}
+				LogSuccess("Scaffolded GoReleaser configuration (.goreleaser.yaml)")
+			}
+		}
+	}
+
+	return true, nil
+}
+
 // Audit Engine
 func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOnly bool) (bool, error) {
 	fmt.Printf("\n%sAuditing Repository Standards:%s %s\n\n", Bold, Reset, repoRoot)
@@ -999,12 +1066,40 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 			}
 		}
 
+		releaseWorkflowPath := filepath.Join(repoRoot, ".github", "workflows", "release.yml")
+		hasReleaseWorkflow := false
+		hasReleasePermissions := false
+		if fileExists(releaseWorkflowPath) {
+			if relData, err := os.ReadFile(releaseWorkflowPath); err == nil {
+				relContent := string(relData)
+				if strings.Contains(relContent, "release-please") ||
+					strings.Contains(relContent, "reusable-release-") ||
+					strings.Contains(relContent, "action-gh-release") ||
+					strings.Contains(relContent, "goreleaser") {
+					hasReleaseWorkflow = true
+				}
+				if hasReleaseWorkflow {
+					hasContentsWrite := strings.Contains(relContent, "contents: write") ||
+						strings.Contains(relContent, "contents:write") ||
+						strings.Contains(relContent, "write-all")
+					hasPRWrite := strings.Contains(relContent, "pull-requests: write") ||
+						strings.Contains(relContent, "pull-requests:write") ||
+						strings.Contains(relContent, "write-all")
+					if hasContentsWrite && hasPRWrite {
+						hasReleasePermissions = true
+					}
+				}
+			}
+		}
+
 		localItems = []CheckItem{
 			{Label: "Local Conventional Commit Hook Installed (.git/hooks/commit-msg)", Passed: hasHook},
 			{Label: "Local Pre-commit Hook Installed (.git/hooks/pre-commit)", Passed: hasPreHook},
 			{Label: "Pull Request Template (.github/pull_request_template.md)", Passed: hasPRTemplate},
 			{Label: ciLabel, Passed: hasCIWorkflow},
 			{Label: "CI Workflow PR Event Guard (skips PR check on main push)", Passed: hasPRGuard},
+			{Label: "Release Workflow Active (.github/workflows/release.yml)", Passed: hasReleaseWorkflow},
+			{Label: "Release Workflow Permissions (contents: write, pull-requests: write)", Passed: hasReleasePermissions},
 		}
 	}
 
@@ -1098,6 +1193,7 @@ func ConfigureRepository(targetDir string, force bool) error {
 	_ = InstallHooks(repoRoot, true)
 	_ = ScaffoldTemplates(repoRoot, force)
 	_, _ = ScaffoldArchetypeCI(repoRoot, force)
+	_, _ = ScaffoldReleaseWorkflow(repoRoot, force)
 
 	fmt.Println()
 	LogSuccess("Repository configuration complete!")
@@ -1194,6 +1290,7 @@ func CreateRepository(name string, description string, public bool, templateType
 	}
 
 	_ = ScaffoldTemplates(absPath, true)
+	_, _ = ScaffoldReleaseWorkflow(absPath, true)
 	_ = InstallHooks(absPath, true)
 
 	RunCmd([]string{"git", "add", "."}, absPath)
