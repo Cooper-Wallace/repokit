@@ -340,6 +340,9 @@ func TestAuditLocalFast(t *testing.T) {
 	if err := ScaffoldTemplates(target, true); err != nil {
 		t.Fatalf("ScaffoldTemplates failed: %v", err)
 	}
+	if _, err := ScaffoldReleaseWorkflow(target, true); err != nil {
+		t.Fatalf("ScaffoldReleaseWorkflow failed: %v", err)
+	}
 
 	ciDir := filepath.Join(target, ".github", "workflows")
 	_ = os.MkdirAll(ciDir, 0755)
@@ -384,11 +387,20 @@ func TestAuditGovernanceHub(t *testing.T) {
 		t.Errorf("Governance hub without test.yml should fail audit")
 	}
 
-	// Governance hub with test.yml should pass audit
+	// Governance hub with test.yml and release.yml should pass audit
 	_ = os.WriteFile(filepath.Join(target, ".github", "workflows", "test.yml"), []byte("name: Test\n"), 0644)
+	relContent := `name: Release
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  release-please:
+    uses: Cooper-Wallace/repokit/.github/workflows/reusable-release-prep.yml@main
+`
+	_ = os.WriteFile(filepath.Join(target, ".github", "workflows", "release.yml"), []byte(relContent), 0644)
 	passedHub, _ := AuditRepository(target, "", true, false)
 	if !passedHub {
-		t.Errorf("Governance hub with test.yml should pass audit")
+		t.Errorf("Governance hub with test.yml and release.yml should pass audit")
 	}
 }
 
@@ -724,6 +736,65 @@ func TestScaffoldArchetypeCI(t *testing.T) {
 		patched, _ := ScaffoldArchetypeCI(target, false)
 		if !patched {
 			t.Errorf("Expected patch without archetype to succeed")
+		}
+	})
+}
+
+func TestScaffoldReleaseWorkflow(t *testing.T) {
+	t.Run("scaffold_new_generic", func(t *testing.T) {
+		target := t.TempDir()
+		scaffolded, err := ScaffoldReleaseWorkflow(target, false)
+		if err != nil {
+			t.Fatalf("ScaffoldReleaseWorkflow failed: %v", err)
+		}
+		if !scaffolded {
+			t.Errorf("Expected ScaffoldReleaseWorkflow to return true")
+		}
+		relPath := filepath.Join(target, ".github", "workflows", "release.yml")
+		if !fileExists(relPath) {
+			t.Fatalf("Expected .github/workflows/release.yml to exist")
+		}
+		data, _ := os.ReadFile(relPath)
+		if !strings.Contains(string(data), DefaultGovernanceRepo) {
+			t.Errorf("Expected release.yml to contain DefaultGovernanceRepo")
+		}
+		if !strings.Contains(string(data), "reusable-release-prep.yml") {
+			t.Errorf("Expected release.yml to call reusable-release-prep.yml")
+		}
+	})
+
+	t.Run("scaffold_go_archetype", func(t *testing.T) {
+		target := t.TempDir()
+		_ = os.WriteFile(filepath.Join(target, "go.mod"), []byte("module test\n"), 0644)
+		scaffolded, err := ScaffoldReleaseWorkflow(target, false)
+		if err != nil {
+			t.Fatalf("ScaffoldReleaseWorkflow failed: %v", err)
+		}
+		if !scaffolded {
+			t.Errorf("Expected ScaffoldReleaseWorkflow to return true")
+		}
+		goreleaserPath := filepath.Join(target, ".goreleaser.yaml")
+		if !fileExists(goreleaserPath) {
+			t.Fatalf("Expected .goreleaser.yaml to exist")
+		}
+		data, _ := os.ReadFile(goreleaserPath)
+		if !strings.Contains(string(data), filepath.Base(target)) {
+			t.Errorf("Expected .goreleaser.yaml to contain repo name")
+		}
+	})
+
+	t.Run("existing_no_force", func(t *testing.T) {
+		target := t.TempDir()
+		relDir := filepath.Join(target, ".github", "workflows")
+		_ = os.MkdirAll(relDir, 0755)
+		_ = os.WriteFile(filepath.Join(relDir, "release.yml"), []byte("existing"), 0644)
+
+		scaffolded, err := ScaffoldReleaseWorkflow(target, false)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if scaffolded {
+			t.Errorf("Expected ScaffoldReleaseWorkflow to return false when release.yml exists without force")
 		}
 	})
 }
