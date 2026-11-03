@@ -110,6 +110,15 @@ fi
 **Test Details:**
 <!-- Details or output from testing -->
 
+## Subagent Commit Trail
+<!-- Chronological list of atomic subagent commits on this branch (git log main..HEAD --oneline) preserved in squash-merge body -->
+- 
+
+## Gate 2: Phase 3 Adversarial Review Summary
+<!-- Summary of Root Orchestrator adversarial diff audit, edge-case checks, and guarded failure verification -->
+- **Adversarial Audit Status**: Passed
+- **Guarded Failure / Degrade Path Verified**: 
+
 ## Quality Gates & Sign-Off Checklist
 - [ ] **Gate 1: Automated Quality Gates** (All CI checks pass: ` + "`ci / Test & Coverage`" + `, ` + "`Semantic PR Title Check`" + `)
 - [ ] **Gate 2: Agent Review Verification** (Adversarial diff review conducted; no unresolved warnings, regressions, or security leaks)
@@ -194,6 +203,12 @@ log/
 dist/
 *.egg-info/
 .pytest_cache/
+
+# Test coverage
+coverage.out
+.coverage
+htmlcov/
+coverage/
 
 # Environment
 .venv/
@@ -614,7 +629,22 @@ func ApplyGitHubRepoSettings(repoSlug string) error {
 	return fmt.Errorf("gh api returned exit code %d: %s", code, stderr)
 }
 
+// IsVaultOrExemptRepo returns true if the repository name (after '/', case-insensitive)
+// is "agentvault" or "agent-vault".
+func IsVaultOrExemptRepo(slug string) bool {
+	repoName := slug
+	if idx := strings.LastIndex(slug, "/"); idx != -1 {
+		repoName = slug[idx+1:]
+	}
+	repoName = strings.ToLower(strings.TrimSpace(repoName))
+	return repoName == "agentvault" || repoName == "agent-vault"
+}
+
 func ApplyBranchRuleset(repoSlug string, defaultBranch string, requiredChecks []string) error {
+	if IsVaultOrExemptRepo(repoSlug) {
+		LogInfo("Skipping branch protection ruleset and CI scaffolding for exempt vault repository %s", repoSlug)
+		return nil
+	}
 	if defaultBranch == "" {
 		defaultBranch = "~DEFAULT_BRANCH"
 	}
@@ -810,13 +840,15 @@ func PatchCIWorkflowPRGuard(ciFile string) (bool, error) {
 		return false, err
 	}
 	content := string(data)
+	lines := strings.Split(content, "\n")
+	modified := false
+
+	// 1. Guard validate-pr job if present and unguarded
 	if strings.Contains(content, "validate-pr:") &&
 		!strings.Contains(content, "github.event_name == 'pull_request'") &&
 		!strings.Contains(content, "github.event_name == \"pull_request\"") {
 
-		lines := strings.Split(content, "\n")
 		var newLines []string
-		modified := false
 		for i := 0; i < len(lines); i++ {
 			line := lines[i]
 			newLines = append(newLines, line)
@@ -849,13 +881,59 @@ func PatchCIWorkflowPRGuard(ciFile string) (bool, error) {
 		}
 
 		if modified {
-			newContent := strings.Join(newLines, "\n")
-			if err := os.WriteFile(ciFile, []byte(newContent), 0644); err != nil {
-				return false, err
-			}
-			LogSuccess("Patched existing CI workflow with PR event guard (.github/workflows/ci.yml)")
-			return true, nil
+			lines = newLines
 		}
+	}
+
+	// 2. Patch inline ci: job (runs-on:) name to "ci / Test & Coverage"
+	for i := 0; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "ci:" {
+			jobIndent := len(lines[i]) - len(strings.TrimLeft(lines[i], " \t"))
+			jobEnd := len(lines)
+			for j := i + 1; j < len(lines); j++ {
+				t := strings.TrimSpace(lines[j])
+				if t == "" {
+					continue
+				}
+				lineIndent := len(lines[j]) - len(strings.TrimLeft(lines[j], " \t"))
+				if lineIndent <= jobIndent {
+					jobEnd = j
+					break
+				}
+			}
+
+			hasRunsOn := false
+			for j := i + 1; j < jobEnd; j++ {
+				if strings.Contains(lines[j], "runs-on:") {
+					hasRunsOn = true
+					break
+				}
+			}
+
+			if hasRunsOn {
+				for j := i + 1; j < jobEnd; j++ {
+					t := strings.TrimSpace(lines[j])
+					if strings.HasPrefix(t, "name:") {
+						val := strings.TrimSpace(strings.TrimPrefix(t, "name:"))
+						if val == `"Test & Coverage"` || val == `'Test & Coverage'` || val == `Test & Coverage` {
+							lineIndentStr := lines[j][:len(lines[j])-len(strings.TrimLeft(lines[j], " \t"))]
+							lines[j] = lineIndentStr + `name: "ci / Test & Coverage"`
+							modified = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if modified {
+		newContent := strings.Join(lines, "\n")
+		if err := os.WriteFile(ciFile, []byte(newContent), 0644); err != nil {
+			return false, err
+		}
+		LogSuccess("Patched existing CI workflow (.github/workflows/ci.yml)")
+		return true, nil
 	}
 	return false, nil
 }
@@ -1417,6 +1495,17 @@ func configureSingleRepository(opts ConfigureOptions) error {
 		return fmt.Errorf("could not find GitHub remote origin URL")
 	}
 
+	if IsVaultOrExemptRepo(slug) {
+		LogInfo("Skipping branch protection ruleset and CI scaffolding for exempt vault repository %s", slug)
+		if opts.DryRun {
+			LogInfo("[DRY RUN] Would apply remote GitHub repo settings to %s", slug)
+			return nil
+		}
+		_ = ApplyGitHubRepoSettings(slug)
+		LogSuccess("Repository configuration complete!")
+		return nil
+	}
+
 	if opts.DryRun {
 		LogInfo("[DRY RUN] Would apply remote GitHub repo settings to %s", slug)
 		LogInfo("[DRY RUN] Would apply workflow permissions to %s", slug)
@@ -1592,6 +1681,10 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 
 	for _, slug := range targetSlugs {
 		fmt.Println()
+		if IsVaultOrExemptRepo(slug) {
+			LogInfo("Skipping branch protection ruleset and CI scaffolding for exempt vault repository %s", slug)
+			continue
+		}
 		LogInfo("Configuring repository standards for %s...", slug)
 
 		// Determine local repository path if exists

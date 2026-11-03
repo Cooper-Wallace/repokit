@@ -33,6 +33,26 @@ go test -v -race -cover ./...
 go vet ./...
 ```
 
+## Example Workflow
+Sample CLI or service invocation:
+```bash
+# Run with sample input flag
+./bin/{{repo_name}} --config config.yaml
+
+# Sample expected output:
+# [INFO] Starting {{repo_name}} service...
+# [INFO] Configuration loaded successfully.
+# [SUCCESS] Ready to process requests.
+```
+
+## Configuration, Failure Modes & Safe Degrade Behavior
+- **Configuration Handling**: Supports environment variables (e.g. `CONFIG_PATH`, `APP_ENV`) and CLI flags parsed via standard packages.
+- **Validation & Failure Modes**: Configuration parse errors, schema validation failures, or unreadable config files immediately return typed errors and abort execution with structured exit logging.
+- **Safe Degrade & Abstain Behavior**: When external network or optional backend services are unreachable, the service falls back to safe read-only or cached states and abstains from destructive writes.
+
+## Known Limitations
+- Single-node architecture; distributed consensus across cluster instances requires external coordination.
+
 ## Development & Contribution Flow
 - **Conventional Commits**: All commit messages must follow [Conventional Commits](https://www.conventionalcommits.org/).
 - **Feature Branches**: Branch off `main` via `feat/*` or `fix/*`.

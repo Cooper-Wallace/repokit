@@ -31,3 +31,9 @@ target/
 ### OS ###
 .DS_Store
 *~
+
+# Test coverage
+coverage.out
+.coverage
+htmlcov/
+coverage/

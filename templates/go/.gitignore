@@ -12,6 +12,9 @@ dist/
 *.test
 *.out
 coverage.out
+.coverage
+htmlcov/
+coverage/
 
 # Go workspace
 go.work

@@ -9,6 +9,12 @@ __pycache__/
 dist/
 build/
 
+# Test coverage
+coverage.out
+.coverage
+htmlcov/
+coverage/
+
 # Virtual environments
 .venv/
 env/
