@@ -1,0 +1,89 @@
+name: "Reusable Governance Sync"
+
+on:
+  workflow_call:
+    inputs:
+      governance-repo:
+        description: "Governance repository slug"
+        required: false
+        type: string
+        default: "Cooper-Wallace/repokit"
+      branch:
+        description: "Governance repository branch"
+        required: false
+        type: string
+        default: "main"
+      dry-run:
+        description: "Run sync in dry-run mode without opening PR"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  sync:
+    name: "Sync Governance & Workflows"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout downstream repository
+        uses: actions/checkout@v4
+
+      - name: Checkout governance repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.governance-repo }}
+          ref: ${{ inputs.branch }}
+          path: repokit-src
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Build repokit
+        run: |
+          cd repokit-src
+          go build -o ../bin/repokit ./cmd/repokit
+          cd ..
+
+      - name: Detect archetype and synchronize standards
+        run: |
+          # Run repokit configure / propagate locally on the current repo
+          ./bin/repokit configure --force
+
+      - name: Check for changes and create Pull Request
+        if: ${{ inputs.dry-run == false }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git status --porcelain | grep -q .; then
+            echo "Changes detected from governance sync."
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            
+            git checkout -b chore/repokit-sync
+            git add -A
+            
+            # Detach any unstaged changes or untracked non-governance files if needed
+            git commit -m "chore(repokit): update governance standards and workflows" || echo "No commit needed"
+            git push origin chore/repokit-sync --force || echo "Push failed or unauthorized"
+
+            MODIFIED_FILES=$(git diff --name-only HEAD~1 HEAD || git status --porcelain)
+            BODY_TEXT="Automated governance synchronization from \`${{ inputs.governance-repo }}\` (@ \`${{ inputs.branch }}\`).\n\n### Updated Files:\n\`\`\`text\n${MODIFIED_FILES}\n\`\`\`"
+
+            if gh pr view chore/repokit-sync >/dev/null 2>&1; then
+              echo "Pull request already exists for chore/repokit-sync."
+            else
+              gh pr create \
+                --title "chore(repokit): update governance standards and workflows" \
+                --body "$BODY_TEXT" \
+                --base main \
+                --head chore/repokit-sync || echo "PR creation failed"
+            fi
+          else
+            echo "No changes detected. Repository is fully up to date with governance standards."
+          fi

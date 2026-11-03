@@ -174,6 +174,41 @@ repokit hook install --all
 
 ---
 
+## Central Governance Propagation & Automated Sync
+
+`repokit` provides bidirectional automated synchronization between central governance (`Cooper-Wallace/repokit`) and all downstream archetype repositories (Go, Python, TypeScript, Bash, Java).
+
+### 1. The `repokit propagate` Command
+Propagate repository standards, GitHub settings, branch rulesets, workflows, and PR templates across managed repositories:
+
+```bash
+# Propagate across all GitHub repositories associated with authenticated user
+repokit propagate --all
+
+# Propagate across local repositories in default or specified directory
+repokit propagate --local --path ~/Projects
+
+# Propagate across specific repositories
+repokit propagate --repos repo1,repo2
+
+# Dry-run mode (audit changes without applying)
+repokit propagate --dry-run
+
+# Automatically open Pull Requests on downstream repositories for any updates
+repokit propagate --pr
+```
+
+### 2. GitHub Actions Workflow Permissions
+To allow GitHub Actions workflows in downstream repositories to automatically synchronize workflows and open Pull Requests, ensure the following repository settings are enabled:
+- **Workflow permissions**: "Read and write permissions" (enables `contents: write` and `pull-requests: write`).
+- **Pull Request Approvals**: Enable **"Allow GitHub Actions to create and approve pull requests"** (`can_approve_pull_request_reviews: true`) in repository Actions settings so automated sync PRs can be validated and reviewed smoothly.
+
+### 3. Propagation Patterns
+- **Central Push Trigger (`.github/workflows/propagate.yml`)**: Triggered automatically on pushes to `main` (path filters `templates/**`, `.github/workflows/reusable-*`) or via `workflow_dispatch`. Runs `repokit propagate` across target repositories.
+- **Downstream Scheduled Sync (`.github/workflows/sync.yml`)**: Scaffolds into all archetype repositories. Runs weekly on Mondays at 04:00 UTC (or via `workflow_dispatch`), calling the centralized reusable workflow `.github/workflows/reusable-sync.yml` in `Cooper-Wallace/repokit` to check for updates and open sync PRs automatically.
+
+---
+
 ## Recommended Solo Developer Workflow
 
 Once your repository is standardised, your daily workflow remains fast and clean:
