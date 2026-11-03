@@ -1,0 +1,84 @@
+name: "Central Governance Propagation"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'templates/**'
+      - '.github/workflows/reusable-*'
+  workflow_dispatch:
+    inputs:
+      target_repos:
+        description: "Target repositories to propagate (e.g. 'all', 'local', or comma-separated list like 'repo1,repo2')"
+        required: false
+        type: string
+        default: "all"
+      dry_run:
+        description: "Run propagation in dry-run mode"
+        required: false
+        type: boolean
+        default: false
+      create_pr:
+        description: "Automatically create Pull Requests on downstream repositories"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  propagate:
+    name: "Propagate Standards across Repositories"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repokit
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Build repokit
+        run: |
+          go build -o bin/repokit ./cmd/repokit
+
+      - name: Execute repokit configure
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          TARGETS="${{ inputs.target_repos }}"
+          if [ -z "$TARGETS" ]; then
+            TARGETS="all"
+          fi
+
+          ARGS=""
+          if [ "$TARGETS" = "all" ]; then
+            ARGS="--all"
+          elif [ "$TARGETS" = "local" ]; then
+            ARGS="--local"
+          else
+            ARGS="--repos $TARGETS"
+          fi
+
+          if [ "${{ inputs.dry_run }}" = "true" ] || [ "${{ github.event_name }}" = "push" ]; then
+            if [ -z "${{ secrets.GH_PAT }}" ] && [ "${{ github.event_name }}" = "push" ]; then
+              echo "No GH_PAT secret provided for push event propagation; running in dry-run mode."
+              ARGS="$ARGS --dry-run"
+            elif [ "${{ inputs.dry_run }}" = "true" ]; then
+              ARGS="$ARGS --dry-run"
+            fi
+          fi
+
+          if [ "${{ inputs.create_pr }}" = "true" ] && [ "${{ inputs.dry_run }}" != "true" ]; then
+            ARGS="$ARGS --pr"
+          fi
+
+          echo "Running: ./bin/repokit configure $ARGS"
+          ./bin/repokit configure $ARGS

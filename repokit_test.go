@@ -404,6 +404,39 @@ jobs:
 	}
 }
 
+func TestIsGovernanceHub(t *testing.T) {
+	// Repokit root returns true
+	if !IsGovernanceHub(".") {
+		t.Errorf("Expected repokit root to return true for IsGovernanceHub")
+	}
+
+	// Temp non-governance repo returns false
+	tempNonGov := t.TempDir()
+	if IsGovernanceHub(tempNonGov) {
+		t.Errorf("Expected empty temp repo to return false for IsGovernanceHub")
+	}
+
+	// Temp repo with only archetype files returns false
+	_ = os.WriteFile(filepath.Join(tempNonGov, "go.mod"), []byte("module example.com/test\n"), 0644)
+	if IsGovernanceHub(tempNonGov) {
+		t.Errorf("Expected standard go repo to return false for IsGovernanceHub")
+	}
+
+	// Temp repo with reusable workflow but no repokit binary/files returns false
+	tempPartial := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tempPartial, ".github", "workflows"), 0755)
+	_ = os.WriteFile(filepath.Join(tempPartial, ".github", "workflows", "reusable-python.yml"), []byte("name: Reusable Python\n"), 0644)
+	if IsGovernanceHub(tempPartial) {
+		t.Errorf("Expected repo with only reusable workflows to return false for IsGovernanceHub")
+	}
+
+	// Temp repo with reusable workflow and repokit.go returns true
+	_ = os.WriteFile(filepath.Join(tempPartial, "repokit.go"), []byte("package main\n"), 0644)
+	if !IsGovernanceHub(tempPartial) {
+		t.Errorf("Expected repo with reusable workflow and repokit.go to return true for IsGovernanceHub")
+	}
+}
+
 func TestPRTemplateContainsQualityGates(t *testing.T) {
 	expectedTerms := []string{
 		"## Quality Gates & Sign-Off Checklist",
@@ -653,12 +686,62 @@ func TestAuditRepositoryRemote(t *testing.T) {
 				bytes, _ := json.Marshal(rulesets)
 				return string(bytes), "", 0, nil
 			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/actions/permissions/workflow" {
+				return `{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": true}`, "", 0, nil
+			}
 			return defaultCommandRunner(args, dir, input)
 		}
 
 		passed, err := AuditRepository(tmpDir, "", false, true)
 		if err != nil || !passed {
 			t.Errorf("Expected remote audit to pass, got passed=%v, err=%v", passed, err)
+		}
+	})
+
+	t.Run("workflow_permissions_fails", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit" {
+				data := map[string]interface{}{
+					"allow_squash_merge":          true,
+					"allow_merge_commit":          false,
+					"allow_rebase_merge":          false,
+					"delete_branch_on_merge":      true,
+					"squash_merge_commit_title":   "PR_TITLE",
+					"squash_merge_commit_message": "PR_BODY",
+					"allow_auto_merge":            false,
+				}
+				bytes, _ := json.Marshal(data)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/rulesets" {
+				rulesets := []map[string]interface{}{
+					{
+						"name":        "default-branch-protection",
+						"enforcement": "active",
+						"rules": []map[string]interface{}{
+							{
+								"type": "required_status_checks",
+								"parameters": map[string]interface{}{
+									"required_status_checks": []map[string]string{
+										{"context": "Test & Coverage"},
+									},
+								},
+							},
+						},
+					},
+				}
+				bytes, _ := json.Marshal(rulesets)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/actions/permissions/workflow" {
+				return `{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": false}`, "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		passed, _ := AuditRepository(tmpDir, "", false, true)
+		if passed {
+			t.Errorf("Expected remote audit to fail when can_approve_pull_request_reviews is false")
 		}
 	})
 
@@ -736,6 +819,48 @@ func TestScaffoldArchetypeCI(t *testing.T) {
 		patched, _ := ScaffoldArchetypeCI(target, false)
 		if !patched {
 			t.Errorf("Expected patch without archetype to succeed")
+		}
+	})
+
+	t.Run("governance_hub_skipped", func(t *testing.T) {
+		target := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(target, ".github", "workflows"), 0755)
+		_ = os.WriteFile(filepath.Join(target, ".github", "workflows", "reusable-go.yml"), []byte("name: Reusable Go\n"), 0644)
+		_ = os.WriteFile(filepath.Join(target, "repokit.go"), []byte("package main\n"), 0644)
+		_ = os.WriteFile(filepath.Join(target, "go.mod"), []byte("module github.com/test/repo\n"), 0644)
+
+		scaffolded, err := ScaffoldArchetypeCI(target, false)
+		if err != nil {
+			t.Fatalf("ScaffoldArchetypeCI returned unexpected error: %v", err)
+		}
+		if scaffolded {
+			t.Errorf("Expected ScaffoldArchetypeCI to return false on governance hub")
+		}
+
+		ciPath := filepath.Join(target, ".github", "workflows", "ci.yml")
+		if fileExists(ciPath) {
+			t.Errorf("Expected ci.yml NOT to be created on governance hub")
+		}
+
+		// Also verify with force = true
+		scaffoldedForce, err := ScaffoldArchetypeCI(target, true)
+		if err != nil {
+			t.Fatalf("ScaffoldArchetypeCI with force returned error: %v", err)
+		}
+		if scaffoldedForce {
+			t.Errorf("Expected ScaffoldArchetypeCI with force to return false on governance hub")
+		}
+		if fileExists(ciPath) {
+			t.Errorf("Expected ci.yml NOT to be created on governance hub even with force")
+		}
+
+		// Also verify on repokit root itself
+		scaffoldedRoot, err := ScaffoldArchetypeCI(".", false)
+		if err != nil {
+			t.Fatalf("ScaffoldArchetypeCI on root returned error: %v", err)
+		}
+		if scaffoldedRoot {
+			t.Errorf("Expected ScaffoldArchetypeCI to return false on repokit root")
 		}
 	})
 }
@@ -1183,4 +1308,337 @@ func TestMoreBranches(t *testing.T) {
 		// local_only=true and remote_only=true activates both
 		_, _ = AuditRepository(tmpDir, "", true, true)
 	})
+}
+
+func TestApplyWorkflowPermissions(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	t.Run("success", func(t *testing.T) {
+		var capturedArgs []string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			capturedArgs = args
+			return "{}", "", 0, nil
+		}
+		err := ApplyWorkflowPermissions("org/my-repo")
+		if err != nil {
+			t.Fatalf("Expected ApplyWorkflowPermissions to succeed, got %v", err)
+		}
+		expectedEndpoint := "repos/org/my-repo/actions/permissions/workflow"
+		foundEndpoint := false
+		foundDefaultPerms := false
+		foundCanApprove := false
+		for i, a := range capturedArgs {
+			if a == expectedEndpoint {
+				foundEndpoint = true
+			}
+			if a == "-F" && i+1 < len(capturedArgs) {
+				if capturedArgs[i+1] == "default_workflow_permissions=read" {
+					foundDefaultPerms = true
+				}
+				if capturedArgs[i+1] == "can_approve_pull_request_reviews=true" {
+					foundCanApprove = true
+				}
+			}
+		}
+		if !foundEndpoint {
+			t.Errorf("Expected endpoint %s in args: %v", expectedEndpoint, capturedArgs)
+		}
+		if !foundDefaultPerms {
+			t.Errorf("Expected default_workflow_permissions=read in args: %v", capturedArgs)
+		}
+		if !foundCanApprove {
+			t.Errorf("Expected can_approve_pull_request_reviews=true in args: %v", capturedArgs)
+		}
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			return "", "Permission denied", 1, fmt.Errorf("exit status 1")
+		}
+		err := ApplyWorkflowPermissions("org/my-repo")
+		if err == nil {
+			t.Errorf("Expected ApplyWorkflowPermissions to fail on exit code 1")
+		}
+	})
+}
+
+func TestRulesetIDFormatting(t *testing.T) {
+	t.Run("formatRulesetID_types", func(t *testing.T) {
+		largeID := float64(22459068)
+		formatted := FormatRulesetID(largeID)
+		if formatted != "22459068" {
+			t.Errorf("FormatRulesetID(float64(22459068)) = %q, want '22459068'", formatted)
+		}
+		if strings.Contains(formatted, "e+") || strings.Contains(formatted, "E+") {
+			t.Errorf("FormatRulesetID produced scientific notation: %s", formatted)
+		}
+
+		if got := FormatRulesetID(int64(22459068)); got != "22459068" {
+			t.Errorf("FormatRulesetID(int64) = %q, want '22459068'", got)
+		}
+		if got := FormatRulesetID(42); got != "42" {
+			t.Errorf("FormatRulesetID(int) = %q, want '42'", got)
+		}
+		if got := FormatRulesetID("99999"); got != "99999" {
+			t.Errorf("FormatRulesetID(string) = %q, want '99999'", got)
+		}
+	})
+
+	t.Run("apply_branch_ruleset_float_id", func(t *testing.T) {
+		oldRunner := CommandRunner
+		defer func() { CommandRunner = oldRunner }()
+
+		var capturedURL string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 2 && args[2] == "repos/org/repo/rulesets" {
+				return `[{"id": 22459068, "name": "default-branch-protection"}]`, "", 0, nil
+			}
+			if len(args) > 4 && args[1] == "api" && args[3] == "PUT" {
+				capturedURL = args[4]
+				return "{}", "", 0, nil
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ApplyBranchRuleset("org/repo", "~DEFAULT_BRANCH", nil)
+		if err != nil {
+			t.Fatalf("ApplyBranchRuleset failed: %v", err)
+		}
+		expectedURL := "repos/org/repo/rulesets/22459068"
+		if capturedURL != expectedURL {
+			t.Errorf("Expected PUT URL %q, got %q", expectedURL, capturedURL)
+		}
+	})
+
+	t.Run("audit_repository_float_id", func(t *testing.T) {
+		oldRunner := CommandRunner
+		defer func() { CommandRunner = oldRunner }()
+
+		tmpDir := t.TempDir()
+		cmd := exec.Command("git", "init", "-b", "main")
+		cmd.Dir = tmpDir
+		_ = cmd.Run()
+		cmd = exec.Command("git", "remote", "add", "origin", "https://github.com/org/repo.git")
+		cmd.Dir = tmpDir
+		_ = cmd.Run()
+
+		var detailQueriedURL string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 2 && args[2] == "repos/org/repo" {
+				return `{"allow_squash_merge": true, "allow_merge_commit": false, "allow_rebase_merge": false, "delete_branch_on_merge": true, "squash_merge_commit_title": "PR_TITLE", "squash_merge_commit_message": "PR_BODY", "allow_auto_merge": false}`, "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/org/repo/rulesets" {
+				return `[{"id": 22459068, "name": "default-branch-protection", "enforcement": "active"}]`, "", 0, nil
+			}
+			if len(args) > 2 && strings.HasPrefix(args[2], "repos/org/repo/rulesets/") {
+				detailQueriedURL = args[2]
+				return `{"rules": [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "ci"}]}}]}`, "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/org/repo/actions/permissions/workflow" {
+				return `{"can_approve_pull_request_reviews": true}`, "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		passed, err := AuditRepository(tmpDir, "", false, true)
+		if err != nil || !passed {
+			t.Errorf("Expected audit to pass, got passed=%v, err=%v", passed, err)
+		}
+		expectedDetailURL := "repos/org/repo/rulesets/22459068"
+		if detailQueriedURL != expectedDetailURL {
+			t.Errorf("Expected ruleset detail URL %q, got %q", expectedDetailURL, detailQueriedURL)
+		}
+	})
+}
+
+func TestConfigureWithOptions(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	t.Run("backward_compatible_propagate_no_repos_specified", func(t *testing.T) {
+		err := PropagateRepositories(PropagateOptions{})
+		if err == nil {
+			t.Errorf("Expected error when no repos specified")
+		}
+	})
+
+	t.Run("single_repo_dry_run", func(t *testing.T) {
+		gitDir := t.TempDir()
+		cInit := exec.Command("git", "init", "-b", "main")
+		cInit.Dir = gitDir
+		_ = cInit.Run()
+		cRemote := exec.Command("git", "remote", "add", "origin", "https://github.com/Cooper-Wallace/test-repo.git")
+		cRemote.Dir = gitDir
+		_ = cRemote.Run()
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			TargetDir: gitDir,
+			DryRun:    true,
+		})
+		if err != nil {
+			t.Fatalf("Single repo dry run failed: %v", err)
+		}
+	})
+
+	t.Run("dry_run_with_repos", func(t *testing.T) {
+		mutatingCalls := 0
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			for _, a := range args {
+				if a == "PUT" || a == "PATCH" || a == "POST" || a == "push" || a == "commit" {
+					mutatingCalls++
+				}
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			Repos:  []string{"testorg/repo1", "testorg/repo2"},
+			DryRun: true,
+		})
+		if err != nil {
+			t.Fatalf("Dry run failed: %v", err)
+		}
+		if mutatingCalls > 0 {
+			t.Errorf("Expected 0 mutating calls during dry run, got %d", mutatingCalls)
+		}
+	})
+
+	t.Run("explicit_repos_execution", func(t *testing.T) {
+		var executedEndpoints []string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 4 && args[1] == "api" {
+				executedEndpoints = append(executedEndpoints, args[4])
+			} else if len(args) > 2 && args[1] == "api" {
+				executedEndpoints = append(executedEndpoints, args[2])
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			Repos: []string{"org/repoA"},
+		})
+		if err != nil {
+			t.Fatalf("ConfigureWithOptions failed: %v", err)
+		}
+		hasPatchRepo := false
+		hasWorkflowPerms := false
+		hasRuleset := false
+		for _, ep := range executedEndpoints {
+			if strings.Contains(ep, "repos/org/repoA") {
+				hasPatchRepo = true
+			}
+			if strings.Contains(ep, "actions/permissions/workflow") {
+				hasWorkflowPerms = true
+			}
+			if strings.Contains(ep, "rulesets") {
+				hasRuleset = true
+			}
+		}
+		if !hasPatchRepo || !hasWorkflowPerms || !hasRuleset {
+			t.Errorf("Expected remote calls for repoA, got: %v", executedEndpoints)
+		}
+	})
+
+	t.Run("local_discovery_and_pr_creation", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		repoA := filepath.Join(tmpDir, "repo-local")
+		_ = os.MkdirAll(repoA, 0755)
+
+		cInit := exec.Command("git", "init", "-b", "main")
+		cInit.Dir = repoA
+		_ = cInit.Run()
+		cRemote := exec.Command("git", "remote", "add", "origin", "https://github.com/user/repo-local.git")
+		cRemote.Dir = repoA
+		_ = cRemote.Run()
+		cConfigU := exec.Command("git", "config", "user.name", "Test")
+		cConfigU.Dir = repoA
+		_ = cConfigU.Run()
+		cConfigE := exec.Command("git", "config", "user.email", "test@test.com")
+		cConfigE.Dir = repoA
+		_ = cConfigE.Run()
+
+		var gitCheckoutBranch string
+		var gitPushed bool
+		var prCreated bool
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 0 && args[0] == "git" {
+				for i, a := range args {
+					if a == "checkout" && i+2 < len(args) && args[i+1] == "-B" {
+						gitCheckoutBranch = args[i+2]
+						return "", "", 0, nil
+					}
+					if a == "push" {
+						gitPushed = true
+						return "", "", 0, nil
+					}
+				}
+				return defaultCommandRunner(args, dir, input)
+			}
+			if len(args) > 1 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
+				prCreated = true
+				return "https://github.com/user/repo-local/pull/1", "", 0, nil
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			Local:    true,
+			LocalDir: tmpDir,
+			CreatePR: true,
+		})
+		if err != nil {
+			t.Fatalf("ConfigureWithOptions local failed: %v", err)
+		}
+		if gitCheckoutBranch != "chore/repokit-sync" {
+			t.Errorf("Expected checkout of chore/repokit-sync, got %q", gitCheckoutBranch)
+		}
+		if !gitPushed {
+			t.Errorf("Expected git push of chore/repokit-sync")
+		}
+		if !prCreated {
+			t.Errorf("Expected gh pr create to be called")
+		}
+	})
+
+	t.Run("all_discovery", func(t *testing.T) {
+		var listedUser bool
+		var configuredSlugs []string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 2 && args[1] == "api" && args[2] == "user" {
+				return "octocat\n", "", 0, nil
+			}
+			if len(args) > 2 && args[0] == "gh" && args[1] == "repo" && args[2] == "list" {
+				listedUser = true
+				return `[{"nameWithOwner": "octocat/repo1"}, {"nameWithOwner": "octocat/repo2"}]`, "", 0, nil
+			}
+			if len(args) > 2 && args[0] == "gh" && args[1] == "api" {
+				for _, a := range args {
+					if strings.Contains(a, "octocat/repo1") || strings.Contains(a, "octocat/repo2") {
+						configuredSlugs = append(configuredSlugs, a)
+					}
+				}
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			All:    true,
+			DryRun: false,
+		})
+		if err != nil {
+			t.Fatalf("ConfigureWithOptions All failed: %v", err)
+		}
+		if !listedUser {
+			t.Errorf("Expected gh repo list to be called")
+		}
+		if len(configuredSlugs) == 0 {
+			t.Errorf("Expected configuration API calls for discovered repos")
+		}
+	})
+}
+
+func TestPropagateRepositories(t *testing.T) {
+	TestConfigureWithOptions(t)
 }

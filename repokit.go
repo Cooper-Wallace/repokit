@@ -541,6 +541,48 @@ func ApplyArchetypeTemplate(templateName string, targetDir string, variables map
 }
 
 // GitHub Governance API
+func FormatRulesetID(id interface{}) string {
+	switch v := id.(type) {
+	case float64:
+		return fmt.Sprintf("%.0f", v)
+	case float32:
+		return fmt.Sprintf("%.0f", v)
+	case int:
+		return fmt.Sprintf("%d", v)
+	case int64:
+		return fmt.Sprintf("%d", v)
+	case string:
+		return v
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+var formatRulesetID = FormatRulesetID
+
+func ApplyWorkflowPermissions(repoSlug string) error {
+	LogInfo("Configuring GitHub Actions workflow permissions for %s...", repoSlug)
+	stdout, stderr, code, err := RunCmd([]string{
+		"gh", "api", "--method", "PUT",
+		fmt.Sprintf("repos/%s/actions/permissions/workflow", repoSlug),
+		"-F", "default_workflow_permissions=read",
+		"-F", "can_approve_pull_request_reviews=true",
+	}, "")
+	if code == 0 {
+		LogSuccess("GitHub Actions workflow permissions configured (read permissions, can approve PRs).")
+		return nil
+	}
+	msg := strings.TrimSpace(stderr)
+	if msg == "" {
+		msg = strings.TrimSpace(stdout)
+	}
+	LogWarn("Failed to update workflow permissions via GitHub API: %s", msg)
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("gh api returned exit code %d: %s", code, msg)
+}
+
 func ApplyGitHubRepoSettings(repoSlug string) error {
 	LogInfo("Applying GitHub merge and branch cleanup settings to %s...", repoSlug)
 	payload := map[string]interface{}{
@@ -646,8 +688,9 @@ func ApplyBranchRuleset(repoSlug string, defaultBranch string, requiredChecks []
 
 	var cmdArgs []string
 	if existingID != nil {
-		LogInfo("Updating existing ruleset (ID: %v)...", existingID)
-		cmdArgs = []string{"gh", "api", "--method", "PUT", fmt.Sprintf("repos/%s/rulesets/%v", repoSlug, existingID), "--input", "-"}
+		idStr := formatRulesetID(existingID)
+		LogInfo("Updating existing ruleset (ID: %s)...", idStr)
+		cmdArgs = []string{"gh", "api", "--method", "PUT", fmt.Sprintf("repos/%s/rulesets/%s", repoSlug, idStr), "--input", "-"}
 	} else {
 		LogInfo("Creating new default branch protection ruleset...")
 		cmdArgs = []string{"gh", "api", "--method", "POST", fmt.Sprintf("repos/%s/rulesets", repoSlug), "--input", "-"}
@@ -817,7 +860,18 @@ func PatchCIWorkflowPRGuard(ciFile string) (bool, error) {
 	return false, nil
 }
 
+func IsGovernanceHub(repoRoot string) bool {
+	return (fileExists(filepath.Join(repoRoot, ".github", "workflows", "reusable-python.yml")) ||
+		fileExists(filepath.Join(repoRoot, ".github", "workflows", "reusable-go.yml"))) &&
+		(fileExists(filepath.Join(repoRoot, "bin", "repokit")) ||
+			fileExists(filepath.Join(repoRoot, "cmd", "repokit", "main.go")) ||
+			fileExists(filepath.Join(repoRoot, "repokit.go")))
+}
+
 func ScaffoldArchetypeCI(repoRoot string, force bool) (bool, error) {
+	if IsGovernanceHub(repoRoot) {
+		return false, nil
+	}
 	archetype := DetectArchetype(repoRoot)
 	targetCI := filepath.Join(repoRoot, ".github", "workflows", "ci.yml")
 	if archetype == "" {
@@ -964,7 +1018,7 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 						if rRules, ok := r["rules"].([]interface{}); ok && len(rRules) > 0 {
 							rules = rRules
 						} else if idVal, ok := r["id"]; ok {
-							stdoutDetail, _, codeDetail, _ := RunCmd([]string{"gh", "api", fmt.Sprintf("repos/%s/rulesets/%v", slug, idVal)}, "")
+							stdoutDetail, _, codeDetail, _ := RunCmd([]string{"gh", "api", fmt.Sprintf("repos/%s/rulesets/%s", slug, formatRulesetID(idVal))}, "")
 							if codeDetail == 0 {
 								var detail map[string]interface{}
 								if err := json.Unmarshal([]byte(stdoutDetail), &detail); err == nil {
@@ -996,6 +1050,15 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 			}
 		}
 
+		stdoutPerms, _, codePerms, _ := RunCmd([]string{"gh", "api", fmt.Sprintf("repos/%s/actions/permissions/workflow", slug)}, "")
+		canApprovePRs := false
+		if codePerms == 0 && stdoutPerms != "" {
+			var permsData map[string]interface{}
+			if err := json.Unmarshal([]byte(stdoutPerms), &permsData); err == nil {
+				canApprovePRs = permsData["can_approve_pull_request_reviews"] == true
+			}
+		}
+
 		remoteItems = []CheckItem{
 			{Label: "Squash & Merge Enabled", Passed: squashEnabled},
 			{Label: "Merge Commits Disabled", Passed: mergeCommitDisabled},
@@ -1006,6 +1069,7 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 			{Label: "Auto-Merge Disabled (Human Gate)", Passed: autoMergeDisabled},
 			{Label: "Default Branch Protection Ruleset Active", Passed: hasRuleset},
 			{Label: "Branch Ruleset Enforces Required Status Checks", Passed: rulesetHasStatusChecks},
+			{Label: "GitHub Actions Permitted to Create/Approve PRs (Workflow Permissions)", Passed: canApprovePRs},
 		}
 	}
 
@@ -1021,11 +1085,7 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 		hasPRTemplate := fileExists(filepath.Join(repoRoot, ".github", "pull_request_template.md"))
 
 		ciWorkflowPath := filepath.Join(repoRoot, ".github", "workflows", "ci.yml")
-		isGovernanceHub := (fileExists(filepath.Join(repoRoot, ".github", "workflows", "reusable-python.yml")) ||
-			fileExists(filepath.Join(repoRoot, ".github", "workflows", "reusable-go.yml"))) &&
-			(fileExists(filepath.Join(repoRoot, "bin", "repokit")) ||
-				fileExists(filepath.Join(repoRoot, "cmd", "repokit", "main.go")) ||
-				fileExists(filepath.Join(repoRoot, "repokit.go")))
+		isGovernanceHub := IsGovernanceHub(repoRoot)
 
 		var hasCIWorkflow bool
 		var ciLabel string
@@ -1174,30 +1234,10 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 
 // Commands
 func ConfigureRepository(targetDir string, force bool) error {
-	repoRoot, err := GetGitRepoRoot(targetDir)
-	if err != nil || repoRoot == "" {
-		LogError("Target '%s' is not inside a git repository.", targetDir)
-		return fmt.Errorf("target '%s' is not inside a git repository", targetDir)
-	}
-
-	slug, err := GetRepoSlug(repoRoot)
-	if err != nil || slug == "" {
-		LogError("Could not find GitHub remote origin URL for this repository.")
-		return fmt.Errorf("could not find GitHub remote origin URL")
-	}
-
-	fmt.Printf("%sConfiguring Repository:%s %s (%s)\n\n", Bold, Reset, slug, repoRoot)
-
-	_ = ApplyGitHubRepoSettings(slug)
-	_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil)
-	_ = InstallHooks(repoRoot, true)
-	_ = ScaffoldTemplates(repoRoot, force)
-	_, _ = ScaffoldArchetypeCI(repoRoot, force)
-	_, _ = ScaffoldReleaseWorkflow(repoRoot, force)
-
-	fmt.Println()
-	LogSuccess("Repository configuration complete!")
-	return nil
+	return ConfigureWithOptions(ConfigureOptions{
+		TargetDir: targetDir,
+		Force:     force,
+	})
 }
 
 func CreateRepository(name string, description string, public bool, templateType string, targetDir string) error {
@@ -1303,6 +1343,7 @@ func CreateRepository(name string, description string, public bool, templateType
 	}
 
 	_ = ApplyGitHubRepoSettings(slug)
+	_ = ApplyWorkflowPermissions(slug)
 	_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil)
 
 	fmt.Println()
@@ -1325,4 +1366,318 @@ func PrintTemplates() {
 	}
 	fmt.Printf("\n%sUsage Example:%s\n", Bold, Reset)
 	fmt.Printf("  repokit create my-api --type python --public -d 'My Python service'\n\n")
+}
+
+// Configuration & Multi-Repository Discovery Engine
+type ConfigureOptions struct {
+	All       bool
+	Repos     []string
+	Local     bool
+	LocalDir  string
+	TargetDir string
+	Force     bool
+	DryRun    bool
+	CreatePR  bool
+}
+
+// PropagateOptions is an alias for ConfigureOptions for backward compatibility.
+type PropagateOptions = ConfigureOptions
+
+// PropagateRepositories is retained for backward compatibility.
+func PropagateRepositories(opts PropagateOptions) error {
+	if !opts.All && !opts.Local && len(opts.Repos) == 0 {
+		return fmt.Errorf("no repositories specified to propagate (use --all, --local, or --repos)")
+	}
+	return ConfigureWithOptions(opts)
+}
+
+// ConfigureWithOptions applies repository standards to a single repo or across discovered repos.
+func ConfigureWithOptions(opts ConfigureOptions) error {
+	if opts.All || len(opts.Repos) > 0 || opts.Local {
+		return configureMultipleRepositories(opts)
+	}
+	return configureSingleRepository(opts)
+}
+
+func configureSingleRepository(opts ConfigureOptions) error {
+	targetDir := opts.TargetDir
+	if targetDir == "" && opts.LocalDir != "" {
+		targetDir = opts.LocalDir
+	}
+
+	repoRoot, err := GetGitRepoRoot(targetDir)
+	if err != nil || repoRoot == "" {
+		LogError("Target '%s' is not inside a git repository.", targetDir)
+		return fmt.Errorf("target '%s' is not inside a git repository", targetDir)
+	}
+
+	slug, err := GetRepoSlug(repoRoot)
+	if err != nil || slug == "" {
+		LogError("Could not find GitHub remote origin URL for this repository.")
+		return fmt.Errorf("could not find GitHub remote origin URL")
+	}
+
+	if opts.DryRun {
+		LogInfo("[DRY RUN] Would apply remote GitHub repo settings to %s", slug)
+		LogInfo("[DRY RUN] Would apply workflow permissions to %s", slug)
+		LogInfo("[DRY RUN] Would apply branch protection ruleset to %s", slug)
+		LogInfo("[DRY RUN] Would configure local repository at %s (force=%v)", repoRoot, opts.Force)
+		if opts.CreatePR {
+			LogInfo("[DRY RUN] Would check git status and create PR on chore/repokit-sync at %s if changes exist", repoRoot)
+		}
+		return nil
+	}
+
+	fmt.Printf("%sConfiguring Repository:%s %s (%s)\n\n", Bold, Reset, slug, repoRoot)
+
+	_ = ApplyGitHubRepoSettings(slug)
+	_ = ApplyWorkflowPermissions(slug)
+	_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil)
+	_ = InstallHooks(repoRoot, true)
+	_ = ScaffoldTemplates(repoRoot, opts.Force)
+	_, _ = ScaffoldArchetypeCI(repoRoot, opts.Force)
+	_, _ = ScaffoldReleaseWorkflow(repoRoot, opts.Force)
+
+	if opts.CreatePR {
+		statusOut, _, _, _ := RunCmd([]string{"git", "-C", repoRoot, "status", "--porcelain"}, "")
+		if strings.TrimSpace(statusOut) != "" {
+			LogInfo("Detected modified files in %s, creating PR...", repoRoot)
+			_, stderr, code, _ := RunCmd([]string{"git", "-C", repoRoot, "checkout", "-B", "chore/repokit-sync"}, "")
+			if code != 0 {
+				LogWarn("Failed to checkout branch chore/repokit-sync in %s: %s", repoRoot, strings.TrimSpace(stderr))
+			} else {
+				_, stderr, code, _ = RunCmd([]string{"git", "-C", repoRoot, "add", "-A"}, "")
+				if code != 0 {
+					LogWarn("Failed to stage changes in %s: %s", repoRoot, strings.TrimSpace(stderr))
+				} else {
+					commitMsg := "chore(repokit): configure repository governance, workflows, and templates"
+					_, stderr, code, _ = RunCmd([]string{"git", "-C", repoRoot, "commit", "-m", commitMsg}, "")
+					if code != 0 {
+						LogWarn("Failed to commit changes in %s: %s", repoRoot, strings.TrimSpace(stderr))
+					} else {
+						_, stderr, code, _ = RunCmd([]string{"git", "-C", repoRoot, "push", "-u", "origin", "chore/repokit-sync", "--force"}, "")
+						if code != 0 {
+							LogWarn("Failed to push chore/repokit-sync for %s: %s", slug, strings.TrimSpace(stderr))
+						}
+						prBody := "Automated sync of repository governance, GitHub Actions workflows, and project templates via repokit configure."
+						prOut, prErr, prCode, _ := RunCmd([]string{
+							"gh", "pr", "create",
+							"--title", commitMsg,
+							"--body", prBody,
+						}, repoRoot)
+						if prCode == 0 {
+							LogSuccess("Created PR for %s: %s", slug, strings.TrimSpace(prOut))
+						} else {
+							LogWarn("gh pr create for %s: %s", slug, strings.TrimSpace(prErr))
+						}
+					}
+				}
+			}
+		} else {
+			LogInfo("No local modifications detected in %s; skipping PR creation.", repoRoot)
+		}
+	}
+
+	fmt.Println()
+	LogSuccess("Repository configuration complete!")
+	return nil
+}
+
+func configureMultipleRepositories(opts ConfigureOptions) error {
+	localBaseDir := opts.LocalDir
+	if localBaseDir == "" {
+		home := os.Getenv("HOME")
+		if home == "" {
+			if h, err := os.UserHomeDir(); err == nil {
+				home = h
+			}
+		}
+		localBaseDir = filepath.Join(home, "Projects")
+	}
+
+	var targetSlugs []string
+	slugMap := make(map[string]bool)
+	slugToLocalPath := make(map[string]string)
+
+	addSlug := func(slug string, localPath string) {
+		slug = strings.TrimSpace(slug)
+		if slug == "" {
+			return
+		}
+		if !slugMap[slug] {
+			slugMap[slug] = true
+			targetSlugs = append(targetSlugs, slug)
+		}
+		if localPath != "" && slugToLocalPath[slug] == "" {
+			slugToLocalPath[slug] = localPath
+		}
+	}
+
+	// 1. Explicit repos list
+	if len(opts.Repos) > 0 {
+		var user string
+		for _, r := range opts.Repos {
+			r = strings.TrimSpace(r)
+			if r == "" {
+				continue
+			}
+			if !strings.Contains(r, "/") {
+				if user == "" {
+					u, _ := GetGitHubUser()
+					user = u
+				}
+				if user != "" {
+					r = fmt.Sprintf("%s/%s", user, r)
+				}
+			}
+			addSlug(r, "")
+		}
+	}
+
+	// 2. Local repository discovery
+	if opts.Local {
+		entries, err := os.ReadDir(localBaseDir)
+		if err != nil {
+			LogWarn("Could not read local directory %s: %v", localBaseDir, err)
+		} else {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				repoPath := filepath.Join(localBaseDir, entry.Name())
+				if isDir(filepath.Join(repoPath, ".git")) {
+					slug, err := GetRepoSlug(repoPath)
+					if err == nil && slug != "" {
+						addSlug(slug, repoPath)
+					}
+				}
+			}
+		}
+	}
+
+	// 3. GitHub account discovery
+	if opts.All {
+		user, err := GetGitHubUser()
+		if err != nil || user == "" {
+			LogError("Failed to get authenticated GitHub user: %v", err)
+			return fmt.Errorf("failed to get github user: %w", err)
+		}
+		stdout, stderr, code, err := RunCmd([]string{
+			"gh", "repo", "list", user, "--limit", "100", "--json", "nameWithOwner",
+		}, "")
+		if code != 0 {
+			LogError("Failed to list repositories for %s: %s", user, strings.TrimSpace(stderr))
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("gh repo list failed: %s", stderr)
+		}
+		var ghRepos []struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &ghRepos); err != nil {
+			return fmt.Errorf("failed to parse gh repo list output: %w", err)
+		}
+		for _, r := range ghRepos {
+			addSlug(r.NameWithOwner, "")
+		}
+	}
+
+	if len(targetSlugs) == 0 {
+		LogWarn("No repositories found matching configuration criteria.")
+		return nil
+	}
+
+	LogInfo("Configuring standards across %d repositories...", len(targetSlugs))
+
+	for _, slug := range targetSlugs {
+		fmt.Println()
+		LogInfo("Configuring repository standards for %s...", slug)
+
+		// Determine local repository path if exists
+		localPath := slugToLocalPath[slug]
+		if localPath == "" {
+			parts := strings.Split(slug, "/")
+			repoName := parts[len(parts)-1]
+			candidate := filepath.Join(localBaseDir, repoName)
+			if isDir(filepath.Join(candidate, ".git")) {
+				localPath = candidate
+			}
+		}
+
+		if opts.DryRun {
+			LogInfo("[DRY RUN] Would apply remote GitHub repo settings to %s", slug)
+			LogInfo("[DRY RUN] Would apply workflow permissions to %s", slug)
+			LogInfo("[DRY RUN] Would apply branch protection ruleset to %s", slug)
+			if localPath != "" {
+				LogInfo("[DRY RUN] Would configure local repository at %s (force=%v)", localPath, opts.Force)
+				if opts.CreatePR {
+					LogInfo("[DRY RUN] Would check git status and create PR on chore/repokit-sync at %s if changes exist", localPath)
+				}
+			}
+			continue
+		}
+
+		// 1. Remote GitHub settings
+		if err := ApplyGitHubRepoSettings(slug); err != nil {
+			LogWarn("Failed to apply GitHub repo settings for %s: %v", slug, err)
+		}
+		if err := ApplyWorkflowPermissions(slug); err != nil {
+			LogWarn("Failed to apply workflow permissions for %s: %v", slug, err)
+		}
+		if err := ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil); err != nil {
+			LogWarn("Failed to apply branch ruleset for %s: %v", slug, err)
+		}
+
+		// 2. Local repository configuration & PR creation
+		if localPath != "" {
+			if err := ConfigureRepository(localPath, opts.Force); err != nil {
+				LogWarn("Failed to configure local repository at %s: %v", localPath, err)
+			}
+
+			if opts.CreatePR {
+				statusOut, _, _, _ := RunCmd([]string{"git", "-C", localPath, "status", "--porcelain"}, "")
+				if strings.TrimSpace(statusOut) != "" {
+					LogInfo("Detected modified files in %s, creating PR...", localPath)
+					_, stderr, code, _ := RunCmd([]string{"git", "-C", localPath, "checkout", "-B", "chore/repokit-sync"}, "")
+					if code != 0 {
+						LogWarn("Failed to checkout branch chore/repokit-sync in %s: %s", localPath, strings.TrimSpace(stderr))
+						continue
+					}
+					_, stderr, code, _ = RunCmd([]string{"git", "-C", localPath, "add", "-A"}, "")
+					if code != 0 {
+						LogWarn("Failed to stage changes in %s: %s", localPath, strings.TrimSpace(stderr))
+						continue
+					}
+					commitMsg := "chore(repokit): configure latest governance, workflows, and templates"
+					_, stderr, code, _ = RunCmd([]string{"git", "-C", localPath, "commit", "-m", commitMsg}, "")
+					if code != 0 {
+						LogWarn("Failed to commit changes in %s: %s", localPath, strings.TrimSpace(stderr))
+						continue
+					}
+					_, stderr, code, _ = RunCmd([]string{"git", "-C", localPath, "push", "-u", "origin", "chore/repokit-sync", "--force"}, "")
+					if code != 0 {
+						LogWarn("Failed to push chore/repokit-sync for %s: %s", slug, strings.TrimSpace(stderr))
+					}
+					prBody := "Automated sync of repository governance, GitHub Actions workflows, and project templates via repokit configuration engine."
+					prOut, prErr, prCode, _ := RunCmd([]string{
+						"gh", "pr", "create",
+						"--title", commitMsg,
+						"--body", prBody,
+					}, localPath)
+					if prCode == 0 {
+						LogSuccess("Created PR for %s: %s", slug, strings.TrimSpace(prOut))
+					} else {
+						LogWarn("gh pr create for %s: %s", slug, strings.TrimSpace(prErr))
+					}
+				} else {
+					LogInfo("No local modifications detected in %s; skipping PR creation.", localPath)
+				}
+			}
+		}
+	}
+
+	fmt.Println()
+	LogSuccess("Repository configuration complete across %d repositories!", len(targetSlugs))
+	return nil
 }

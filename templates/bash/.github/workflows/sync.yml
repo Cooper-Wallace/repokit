@@ -1,0 +1,21 @@
+name: "Governance Sync"
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Run sync in dry-run mode without opening PR"
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  sync:
+    name: "Sync with Repokit Governance"
+    uses: {{governance_slug}}/.github/workflows/reusable-sync.yml@main
+    with:
+      dry-run: ${{ inputs.dry-run || false }}
+    secrets:
+      inherit

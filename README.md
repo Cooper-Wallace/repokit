@@ -119,12 +119,30 @@ Local Repository Standards:
 ---
 
 ## 2. Apply Standards to an Existing Repository
-Apply GitHub API merge settings, branch protection rulesets, local hooks, and templates:
+Apply GitHub API merge settings, branch protection rulesets, local hooks, and templates to a single repository or discovered repositories:
+
 ```bash
-cd /path/to/my-existing-project
+# In the target repository directory:
 repokit configure
+
+# Or specify a target path:
+repokit configure /path/to/my-existing-project
+
+# Overwrite existing PR templates or workflows:
+repokit configure -f
+
+# Discover and configure across all GitHub repositories:
+repokit configure --all
+
+# Configure across specific repositories:
+repokit configure --repos repo1,repo2
+
+# Dry-run mode (audit changes without applying):
+repokit configure --dry-run
+
+# Automatically open Pull Requests on target repositories for any updates:
+repokit configure --all --pr
 ```
-* Use `-f` / `--force` to overwrite existing PR templates or workflows.
 
 ---
 
@@ -171,6 +189,38 @@ repokit hook install
 # Install all hooks (commit-msg and pre-commit structural audit):
 repokit hook install --all
 ```
+
+---
+
+## Central Governance Propagation & Automated Sync
+
+`repokit` provides bidirectional automated synchronization between central governance (`Cooper-Wallace/repokit`) and all downstream archetype repositories (Go, Python, TypeScript, Bash, Java).
+
+### 1. Multi-Repository Configuration via `repokit configure`
+Apply repository standards, GitHub settings, branch rulesets, workflows, and PR templates across managed repositories:
+
+```bash
+# Configure across all GitHub repositories associated with authenticated user
+repokit configure --all
+
+# Configure across specific repositories
+repokit configure --repos repo1,repo2
+
+# Dry-run mode (audit changes without applying)
+repokit configure --all --dry-run
+
+# Automatically open Pull Requests on downstream repositories for any updates
+repokit configure --all --pr
+```
+
+### 2. GitHub Actions Workflow Permissions
+To allow GitHub Actions workflows in downstream repositories to automatically synchronize workflows and open Pull Requests, ensure the following repository settings are enabled:
+- **Workflow permissions**: "Read and write permissions" (enables `contents: write` and `pull-requests: write`).
+- **Pull Request Approvals**: Enable **"Allow GitHub Actions to create and approve pull requests"** (`can_approve_pull_request_reviews: true`) in repository Actions settings so automated sync PRs can be validated and reviewed smoothly.
+
+### 3. Propagation Patterns
+- **Central Push Trigger (`.github/workflows/propagate.yml`)**: Triggered automatically on pushes to `main` (path filters `templates/**`, `.github/workflows/reusable-*`) or via `workflow_dispatch`. Runs `repokit configure --all` across target repositories.
+- **Downstream Scheduled Sync (`.github/workflows/sync.yml`)**: Scaffolds into all archetype repositories. Runs weekly on Mondays at 04:00 UTC (or via `workflow_dispatch`), calling the centralized reusable workflow `.github/workflows/reusable-sync.yml` in `Cooper-Wallace/repokit` to check for updates and open sync PRs automatically.
 
 ---
 
