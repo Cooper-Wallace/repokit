@@ -1452,14 +1452,32 @@ func TestRulesetIDFormatting(t *testing.T) {
 	})
 }
 
-func TestPropagateRepositories(t *testing.T) {
+func TestConfigureWithOptions(t *testing.T) {
 	oldRunner := CommandRunner
 	defer func() { CommandRunner = oldRunner }()
 
-	t.Run("no_repos_specified", func(t *testing.T) {
+	t.Run("backward_compatible_propagate_no_repos_specified", func(t *testing.T) {
 		err := PropagateRepositories(PropagateOptions{})
 		if err == nil {
 			t.Errorf("Expected error when no repos specified")
+		}
+	})
+
+	t.Run("single_repo_dry_run", func(t *testing.T) {
+		gitDir := t.TempDir()
+		cInit := exec.Command("git", "init", "-b", "main")
+		cInit.Dir = gitDir
+		_ = cInit.Run()
+		cRemote := exec.Command("git", "remote", "add", "origin", "https://github.com/Cooper-Wallace/test-repo.git")
+		cRemote.Dir = gitDir
+		_ = cRemote.Run()
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			TargetDir: gitDir,
+			DryRun:    true,
+		})
+		if err != nil {
+			t.Fatalf("Single repo dry run failed: %v", err)
 		}
 	})
 
@@ -1474,7 +1492,7 @@ func TestPropagateRepositories(t *testing.T) {
 			return "{}", "", 0, nil
 		}
 
-		err := PropagateRepositories(PropagateOptions{
+		err := ConfigureWithOptions(ConfigureOptions{
 			Repos:  []string{"testorg/repo1", "testorg/repo2"},
 			DryRun: true,
 		})
@@ -1497,11 +1515,11 @@ func TestPropagateRepositories(t *testing.T) {
 			return "{}", "", 0, nil
 		}
 
-		err := PropagateRepositories(PropagateOptions{
+		err := ConfigureWithOptions(ConfigureOptions{
 			Repos: []string{"org/repoA"},
 		})
 		if err != nil {
-			t.Fatalf("PropagateRepositories failed: %v", err)
+			t.Fatalf("ConfigureWithOptions failed: %v", err)
 		}
 		hasPatchRepo := false
 		hasWorkflowPerms := false
@@ -1565,13 +1583,13 @@ func TestPropagateRepositories(t *testing.T) {
 			return "{}", "", 0, nil
 		}
 
-		err := PropagateRepositories(PropagateOptions{
+		err := ConfigureWithOptions(ConfigureOptions{
 			Local:    true,
 			LocalDir: tmpDir,
 			CreatePR: true,
 		})
 		if err != nil {
-			t.Fatalf("PropagateRepositories local failed: %v", err)
+			t.Fatalf("ConfigureWithOptions local failed: %v", err)
 		}
 		if gitCheckoutBranch != "chore/repokit-sync" {
 			t.Errorf("Expected checkout of chore/repokit-sync, got %q", gitCheckoutBranch)
@@ -1586,7 +1604,7 @@ func TestPropagateRepositories(t *testing.T) {
 
 	t.Run("all_discovery", func(t *testing.T) {
 		var listedUser bool
-		var propagatedSlugs []string
+		var configuredSlugs []string
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			if len(args) > 2 && args[1] == "api" && args[2] == "user" {
 				return "octocat\n", "", 0, nil
@@ -1598,25 +1616,29 @@ func TestPropagateRepositories(t *testing.T) {
 			if len(args) > 2 && args[0] == "gh" && args[1] == "api" {
 				for _, a := range args {
 					if strings.Contains(a, "octocat/repo1") || strings.Contains(a, "octocat/repo2") {
-						propagatedSlugs = append(propagatedSlugs, a)
+						configuredSlugs = append(configuredSlugs, a)
 					}
 				}
 			}
 			return "{}", "", 0, nil
 		}
 
-		err := PropagateRepositories(PropagateOptions{
+		err := ConfigureWithOptions(ConfigureOptions{
 			All:    true,
 			DryRun: false,
 		})
 		if err != nil {
-			t.Fatalf("PropagateRepositories All failed: %v", err)
+			t.Fatalf("ConfigureWithOptions All failed: %v", err)
 		}
 		if !listedUser {
 			t.Errorf("Expected gh repo list to be called")
 		}
-		if len(propagatedSlugs) == 0 {
-			t.Errorf("Expected propagation API calls for discovered repos")
+		if len(configuredSlugs) == 0 {
+			t.Errorf("Expected configuration API calls for discovered repos")
 		}
 	})
+}
+
+func TestPropagateRepositories(t *testing.T) {
+	TestConfigureWithOptions(t)
 }

@@ -49,7 +49,7 @@ jobs:
         run: |
           go build -o bin/repokit ./cmd/repokit
 
-      - name: Execute repokit propagate
+      - name: Execute repokit configure
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         run: |
@@ -80,5 +80,5 @@ jobs:
             ARGS="$ARGS --pr"
           fi
 
-          echo "Running: ./bin/repokit propagate $ARGS"
-          ./bin/repokit propagate $ARGS
+          echo "Running: ./bin/repokit configure $ARGS"
+          ./bin/repokit configure $ARGS

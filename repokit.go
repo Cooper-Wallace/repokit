@@ -1234,31 +1234,10 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 
 // Commands
 func ConfigureRepository(targetDir string, force bool) error {
-	repoRoot, err := GetGitRepoRoot(targetDir)
-	if err != nil || repoRoot == "" {
-		LogError("Target '%s' is not inside a git repository.", targetDir)
-		return fmt.Errorf("target '%s' is not inside a git repository", targetDir)
-	}
-
-	slug, err := GetRepoSlug(repoRoot)
-	if err != nil || slug == "" {
-		LogError("Could not find GitHub remote origin URL for this repository.")
-		return fmt.Errorf("could not find GitHub remote origin URL")
-	}
-
-	fmt.Printf("%sConfiguring Repository:%s %s (%s)\n\n", Bold, Reset, slug, repoRoot)
-
-	_ = ApplyGitHubRepoSettings(slug)
-	_ = ApplyWorkflowPermissions(slug)
-	_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil)
-	_ = InstallHooks(repoRoot, true)
-	_ = ScaffoldTemplates(repoRoot, force)
-	_, _ = ScaffoldArchetypeCI(repoRoot, force)
-	_, _ = ScaffoldReleaseWorkflow(repoRoot, force)
-
-	fmt.Println()
-	LogSuccess("Repository configuration complete!")
-	return nil
+	return ConfigureWithOptions(ConfigureOptions{
+		TargetDir: targetDir,
+		Force:     force,
+	})
 }
 
 func CreateRepository(name string, description string, public bool, templateType string, targetDir string) error {
@@ -1389,22 +1368,122 @@ func PrintTemplates() {
 	fmt.Printf("  repokit create my-api --type python --public -d 'My Python service'\n\n")
 }
 
-// Propagation Engine
-type PropagateOptions struct {
-	All      bool
-	Repos    []string
-	Local    bool
-	LocalDir string
-	Force    bool
-	DryRun   bool
-	CreatePR bool
+// Configuration & Multi-Repository Discovery Engine
+type ConfigureOptions struct {
+	All       bool
+	Repos     []string
+	Local     bool
+	LocalDir  string
+	TargetDir string
+	Force     bool
+	DryRun    bool
+	CreatePR  bool
 }
 
+// PropagateOptions is an alias for ConfigureOptions for backward compatibility.
+type PropagateOptions = ConfigureOptions
+
+// PropagateRepositories is retained for backward compatibility.
 func PropagateRepositories(opts PropagateOptions) error {
 	if !opts.All && !opts.Local && len(opts.Repos) == 0 {
 		return fmt.Errorf("no repositories specified to propagate (use --all, --local, or --repos)")
 	}
+	return ConfigureWithOptions(opts)
+}
 
+// ConfigureWithOptions applies repository standards to a single repo or across discovered repos.
+func ConfigureWithOptions(opts ConfigureOptions) error {
+	if opts.All || len(opts.Repos) > 0 || opts.Local {
+		return configureMultipleRepositories(opts)
+	}
+	return configureSingleRepository(opts)
+}
+
+func configureSingleRepository(opts ConfigureOptions) error {
+	targetDir := opts.TargetDir
+	if targetDir == "" && opts.LocalDir != "" {
+		targetDir = opts.LocalDir
+	}
+
+	repoRoot, err := GetGitRepoRoot(targetDir)
+	if err != nil || repoRoot == "" {
+		LogError("Target '%s' is not inside a git repository.", targetDir)
+		return fmt.Errorf("target '%s' is not inside a git repository", targetDir)
+	}
+
+	slug, err := GetRepoSlug(repoRoot)
+	if err != nil || slug == "" {
+		LogError("Could not find GitHub remote origin URL for this repository.")
+		return fmt.Errorf("could not find GitHub remote origin URL")
+	}
+
+	if opts.DryRun {
+		LogInfo("[DRY RUN] Would apply remote GitHub repo settings to %s", slug)
+		LogInfo("[DRY RUN] Would apply workflow permissions to %s", slug)
+		LogInfo("[DRY RUN] Would apply branch protection ruleset to %s", slug)
+		LogInfo("[DRY RUN] Would configure local repository at %s (force=%v)", repoRoot, opts.Force)
+		if opts.CreatePR {
+			LogInfo("[DRY RUN] Would check git status and create PR on chore/repokit-sync at %s if changes exist", repoRoot)
+		}
+		return nil
+	}
+
+	fmt.Printf("%sConfiguring Repository:%s %s (%s)\n\n", Bold, Reset, slug, repoRoot)
+
+	_ = ApplyGitHubRepoSettings(slug)
+	_ = ApplyWorkflowPermissions(slug)
+	_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil)
+	_ = InstallHooks(repoRoot, true)
+	_ = ScaffoldTemplates(repoRoot, opts.Force)
+	_, _ = ScaffoldArchetypeCI(repoRoot, opts.Force)
+	_, _ = ScaffoldReleaseWorkflow(repoRoot, opts.Force)
+
+	if opts.CreatePR {
+		statusOut, _, _, _ := RunCmd([]string{"git", "-C", repoRoot, "status", "--porcelain"}, "")
+		if strings.TrimSpace(statusOut) != "" {
+			LogInfo("Detected modified files in %s, creating PR...", repoRoot)
+			_, stderr, code, _ := RunCmd([]string{"git", "-C", repoRoot, "checkout", "-B", "chore/repokit-sync"}, "")
+			if code != 0 {
+				LogWarn("Failed to checkout branch chore/repokit-sync in %s: %s", repoRoot, strings.TrimSpace(stderr))
+			} else {
+				_, stderr, code, _ = RunCmd([]string{"git", "-C", repoRoot, "add", "-A"}, "")
+				if code != 0 {
+					LogWarn("Failed to stage changes in %s: %s", repoRoot, strings.TrimSpace(stderr))
+				} else {
+					commitMsg := "chore(repokit): configure repository governance, workflows, and templates"
+					_, stderr, code, _ = RunCmd([]string{"git", "-C", repoRoot, "commit", "-m", commitMsg}, "")
+					if code != 0 {
+						LogWarn("Failed to commit changes in %s: %s", repoRoot, strings.TrimSpace(stderr))
+					} else {
+						_, stderr, code, _ = RunCmd([]string{"git", "-C", repoRoot, "push", "-u", "origin", "chore/repokit-sync", "--force"}, "")
+						if code != 0 {
+							LogWarn("Failed to push chore/repokit-sync for %s: %s", slug, strings.TrimSpace(stderr))
+						}
+						prBody := "Automated sync of repository governance, GitHub Actions workflows, and project templates via repokit configure."
+						prOut, prErr, prCode, _ := RunCmd([]string{
+							"gh", "pr", "create",
+							"--title", commitMsg,
+							"--body", prBody,
+						}, repoRoot)
+						if prCode == 0 {
+							LogSuccess("Created PR for %s: %s", slug, strings.TrimSpace(prOut))
+						} else {
+							LogWarn("gh pr create for %s: %s", slug, strings.TrimSpace(prErr))
+						}
+					}
+				}
+			}
+		} else {
+			LogInfo("No local modifications detected in %s; skipping PR creation.", repoRoot)
+		}
+	}
+
+	fmt.Println()
+	LogSuccess("Repository configuration complete!")
+	return nil
+}
+
+func configureMultipleRepositories(opts ConfigureOptions) error {
 	localBaseDir := opts.LocalDir
 	if localBaseDir == "" {
 		home := os.Getenv("HOME")
@@ -1505,15 +1584,15 @@ func PropagateRepositories(opts PropagateOptions) error {
 	}
 
 	if len(targetSlugs) == 0 {
-		LogWarn("No repositories found matching propagation criteria.")
+		LogWarn("No repositories found matching configuration criteria.")
 		return nil
 	}
 
-	LogInfo("Propagating standards across %d repositories...", len(targetSlugs))
+	LogInfo("Configuring standards across %d repositories...", len(targetSlugs))
 
 	for _, slug := range targetSlugs {
 		fmt.Println()
-		LogInfo("Propagating repository standards to %s...", slug)
+		LogInfo("Configuring repository standards for %s...", slug)
 
 		// Determine local repository path if exists
 		localPath := slugToLocalPath[slug]
@@ -1570,7 +1649,7 @@ func PropagateRepositories(opts PropagateOptions) error {
 						LogWarn("Failed to stage changes in %s: %s", localPath, strings.TrimSpace(stderr))
 						continue
 					}
-					commitMsg := "chore(repokit): propagate latest governance, workflows, and templates"
+					commitMsg := "chore(repokit): configure latest governance, workflows, and templates"
 					_, stderr, code, _ = RunCmd([]string{"git", "-C", localPath, "commit", "-m", commitMsg}, "")
 					if code != 0 {
 						LogWarn("Failed to commit changes in %s: %s", localPath, strings.TrimSpace(stderr))
@@ -1580,7 +1659,7 @@ func PropagateRepositories(opts PropagateOptions) error {
 					if code != 0 {
 						LogWarn("Failed to push chore/repokit-sync for %s: %s", slug, strings.TrimSpace(stderr))
 					}
-					prBody := "Automated sync of latest repository governance, GitHub Actions workflows, and project templates via repokit propagation engine."
+					prBody := "Automated sync of repository governance, GitHub Actions workflows, and project templates via repokit configuration engine."
 					prOut, prErr, prCode, _ := RunCmd([]string{
 						"gh", "pr", "create",
 						"--title", commitMsg,
@@ -1599,6 +1678,6 @@ func PropagateRepositories(opts PropagateOptions) error {
 	}
 
 	fmt.Println()
-	LogSuccess("Repository propagation complete across %d repositories!", len(targetSlugs))
+	LogSuccess("Repository configuration complete across %d repositories!", len(targetSlugs))
 	return nil
 }

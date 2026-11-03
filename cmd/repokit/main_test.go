@@ -122,7 +122,7 @@ func TestCLIGitOperations(t *testing.T) {
 	_ = run([]string{"audit", "-t", "go", "--remote", tmpDir})
 }
 
-func TestPropagateCLI(t *testing.T) {
+func TestConfigureDiscoveryCLI(t *testing.T) {
 	oldRunner := repokit.CommandRunner
 	defer func() { repokit.CommandRunner = oldRunner }()
 
@@ -138,25 +138,25 @@ func TestPropagateCLI(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	// Error when no discovery flags provided
+	// Error when propagate is invoked (removed command)
 	if code := run([]string{"propagate"}); code != 1 {
-		t.Errorf("Expected 1 for propagate without flags, got %d", code)
+		t.Errorf("Expected 1 for removed propagate command, got %d", code)
 	}
 
-	// Flag combinations
-	if code := run([]string{"propagate", "--dry-run", "--repos", "r1,r2"}); code != 0 {
-		t.Errorf("Expected 0 for propagate --dry-run --repos r1,r2, got %d", code)
+	// Flag combinations with configure
+	if code := run([]string{"configure", "--dry-run", "--repos", "r1,r2"}); code != 0 {
+		t.Errorf("Expected 0 for configure --dry-run --repos r1,r2, got %d", code)
 	}
 
-	if code := run([]string{"propagate", "--dry-run", "--all"}); code != 0 {
-		t.Errorf("Expected 0 for propagate --dry-run --all, got %d", code)
+	if code := run([]string{"configure", "--dry-run", "--all"}); code != 0 {
+		t.Errorf("Expected 0 for configure --dry-run --all, got %d", code)
 	}
 
-	if code := run([]string{"propagate", "--dry-run", "--local", "--path", tmpDir}); code != 0 {
-		t.Errorf("Expected 0 for propagate --dry-run --local --path <dir>, got %d", code)
+	if code := run([]string{"configure", "--dry-run", "--local", "--path", tmpDir}); code != 0 {
+		t.Errorf("Expected 0 for configure --dry-run --local --path <dir>, got %d", code)
 	}
 
-	if code := run([]string{"propagate", "--repos=r1,r2", "--path=" + tmpDir, "-f", "--pr", "--dry-run"}); code != 0 {
-		t.Errorf("Expected 0 for propagate with inline flags, got %d", code)
+	if code := run([]string{"configure", "--repos=r1,r2", "--path=" + tmpDir, "-f", "--pr", "--dry-run"}); code != 0 {
+		t.Errorf("Expected 0 for configure with inline flags, got %d", code)
 	}
 }
