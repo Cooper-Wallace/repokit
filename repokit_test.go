@@ -404,6 +404,39 @@ jobs:
 	}
 }
 
+func TestIsGovernanceHub(t *testing.T) {
+	// Repokit root returns true
+	if !IsGovernanceHub(".") {
+		t.Errorf("Expected repokit root to return true for IsGovernanceHub")
+	}
+
+	// Temp non-governance repo returns false
+	tempNonGov := t.TempDir()
+	if IsGovernanceHub(tempNonGov) {
+		t.Errorf("Expected empty temp repo to return false for IsGovernanceHub")
+	}
+
+	// Temp repo with only archetype files returns false
+	_ = os.WriteFile(filepath.Join(tempNonGov, "go.mod"), []byte("module example.com/test\n"), 0644)
+	if IsGovernanceHub(tempNonGov) {
+		t.Errorf("Expected standard go repo to return false for IsGovernanceHub")
+	}
+
+	// Temp repo with reusable workflow but no repokit binary/files returns false
+	tempPartial := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tempPartial, ".github", "workflows"), 0755)
+	_ = os.WriteFile(filepath.Join(tempPartial, ".github", "workflows", "reusable-python.yml"), []byte("name: Reusable Python\n"), 0644)
+	if IsGovernanceHub(tempPartial) {
+		t.Errorf("Expected repo with only reusable workflows to return false for IsGovernanceHub")
+	}
+
+	// Temp repo with reusable workflow and repokit.go returns true
+	_ = os.WriteFile(filepath.Join(tempPartial, "repokit.go"), []byte("package main\n"), 0644)
+	if !IsGovernanceHub(tempPartial) {
+		t.Errorf("Expected repo with reusable workflow and repokit.go to return true for IsGovernanceHub")
+	}
+}
+
 func TestPRTemplateContainsQualityGates(t *testing.T) {
 	expectedTerms := []string{
 		"## Quality Gates & Sign-Off Checklist",
@@ -786,6 +819,48 @@ func TestScaffoldArchetypeCI(t *testing.T) {
 		patched, _ := ScaffoldArchetypeCI(target, false)
 		if !patched {
 			t.Errorf("Expected patch without archetype to succeed")
+		}
+	})
+
+	t.Run("governance_hub_skipped", func(t *testing.T) {
+		target := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(target, ".github", "workflows"), 0755)
+		_ = os.WriteFile(filepath.Join(target, ".github", "workflows", "reusable-go.yml"), []byte("name: Reusable Go\n"), 0644)
+		_ = os.WriteFile(filepath.Join(target, "repokit.go"), []byte("package main\n"), 0644)
+		_ = os.WriteFile(filepath.Join(target, "go.mod"), []byte("module github.com/test/repo\n"), 0644)
+
+		scaffolded, err := ScaffoldArchetypeCI(target, false)
+		if err != nil {
+			t.Fatalf("ScaffoldArchetypeCI returned unexpected error: %v", err)
+		}
+		if scaffolded {
+			t.Errorf("Expected ScaffoldArchetypeCI to return false on governance hub")
+		}
+
+		ciPath := filepath.Join(target, ".github", "workflows", "ci.yml")
+		if fileExists(ciPath) {
+			t.Errorf("Expected ci.yml NOT to be created on governance hub")
+		}
+
+		// Also verify with force = true
+		scaffoldedForce, err := ScaffoldArchetypeCI(target, true)
+		if err != nil {
+			t.Fatalf("ScaffoldArchetypeCI with force returned error: %v", err)
+		}
+		if scaffoldedForce {
+			t.Errorf("Expected ScaffoldArchetypeCI with force to return false on governance hub")
+		}
+		if fileExists(ciPath) {
+			t.Errorf("Expected ci.yml NOT to be created on governance hub even with force")
+		}
+
+		// Also verify on repokit root itself
+		scaffoldedRoot, err := ScaffoldArchetypeCI(".", false)
+		if err != nil {
+			t.Fatalf("ScaffoldArchetypeCI on root returned error: %v", err)
+		}
+		if scaffoldedRoot {
+			t.Errorf("Expected ScaffoldArchetypeCI to return false on repokit root")
 		}
 	})
 }

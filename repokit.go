@@ -860,7 +860,18 @@ func PatchCIWorkflowPRGuard(ciFile string) (bool, error) {
 	return false, nil
 }
 
+func IsGovernanceHub(repoRoot string) bool {
+	return (fileExists(filepath.Join(repoRoot, ".github", "workflows", "reusable-python.yml")) ||
+		fileExists(filepath.Join(repoRoot, ".github", "workflows", "reusable-go.yml"))) &&
+		(fileExists(filepath.Join(repoRoot, "bin", "repokit")) ||
+			fileExists(filepath.Join(repoRoot, "cmd", "repokit", "main.go")) ||
+			fileExists(filepath.Join(repoRoot, "repokit.go")))
+}
+
 func ScaffoldArchetypeCI(repoRoot string, force bool) (bool, error) {
+	if IsGovernanceHub(repoRoot) {
+		return false, nil
+	}
 	archetype := DetectArchetype(repoRoot)
 	targetCI := filepath.Join(repoRoot, ".github", "workflows", "ci.yml")
 	if archetype == "" {
@@ -1074,11 +1085,7 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 		hasPRTemplate := fileExists(filepath.Join(repoRoot, ".github", "pull_request_template.md"))
 
 		ciWorkflowPath := filepath.Join(repoRoot, ".github", "workflows", "ci.yml")
-		isGovernanceHub := (fileExists(filepath.Join(repoRoot, ".github", "workflows", "reusable-python.yml")) ||
-			fileExists(filepath.Join(repoRoot, ".github", "workflows", "reusable-go.yml"))) &&
-			(fileExists(filepath.Join(repoRoot, "bin", "repokit")) ||
-				fileExists(filepath.Join(repoRoot, "cmd", "repokit", "main.go")) ||
-				fileExists(filepath.Join(repoRoot, "repokit.go")))
+		isGovernanceHub := IsGovernanceHub(repoRoot)
 
 		var hasCIWorkflow bool
 		var ciLabel string
