@@ -27,6 +27,9 @@ Commands:
   audit [path] [-t/--type <python|java|typescript|bash|go>] [--local] [--remote]
       Audit repository compliance against remote GitHub settings and local standards.
 
+  propagate [--all] [--repos <r1,r2>] [--local] [--path <dir>] [-f/--force] [--dry-run] [--pr]
+      Propagate DevOps standards, branch rulesets, workflow permissions, and templates across repos.
+
   templates
       List available solution archetype templates.
 
@@ -169,8 +172,64 @@ func run(args []string) int {
 			return 1
 		}
 
-		passed, err := repokit.AuditRepository(repoRoot, templateType, localOnly, remoteOnly)
-		if err != nil || !passed {
+		if passed, err := repokit.AuditRepository(repoRoot, templateType, localOnly, remoteOnly); err != nil || !passed {
+			return 1
+		}
+		return 0
+
+	case "propagate":
+		var opts repokit.PropagateOptions
+		for i := 0; i < len(cmdArgs); i++ {
+			arg := cmdArgs[i]
+			switch arg {
+			case "--all":
+				opts.All = true
+			case "--local":
+				opts.Local = true
+			case "-f", "--force":
+				opts.Force = true
+			case "--dry-run":
+				opts.DryRun = true
+			case "--pr":
+				opts.CreatePR = true
+			case "--repos":
+				if i+1 < len(cmdArgs) {
+					i++
+					reposStr := cmdArgs[i]
+					for _, r := range strings.Split(reposStr, ",") {
+						r = strings.TrimSpace(r)
+						if r != "" {
+							opts.Repos = append(opts.Repos, r)
+						}
+					}
+				}
+			case "--path":
+				if i+1 < len(cmdArgs) {
+					i++
+					opts.LocalDir = cmdArgs[i]
+				}
+			default:
+				if strings.HasPrefix(arg, "--repos=") {
+					reposStr := strings.TrimPrefix(arg, "--repos=")
+					for _, r := range strings.Split(reposStr, ",") {
+						r = strings.TrimSpace(r)
+						if r != "" {
+							opts.Repos = append(opts.Repos, r)
+						}
+					}
+				} else if strings.HasPrefix(arg, "--path=") {
+					opts.LocalDir = strings.TrimPrefix(arg, "--path=")
+				}
+			}
+		}
+
+		if !opts.All && !opts.Local && len(opts.Repos) == 0 {
+			repokit.LogError("Must specify at least one discovery mode: --all, --local, or --repos <r1,r2>.")
+			printHelp()
+			return 1
+		}
+
+		if err := repokit.PropagateRepositories(opts); err != nil {
 			return 1
 		}
 		return 0
