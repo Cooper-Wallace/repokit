@@ -3,13 +3,23 @@ name: "Reusable Release Preparation"
 on:
   workflow_call:
     inputs:
-      release-type:
-        description: "Release type for release-please (e.g. simple, go, python, node)"
+      target-branch:
+        description: "Target branch for release promotion (default: main)"
         type: string
-        default: "simple"
+        default: "main"
+        required: false
+      staging-branch:
+        description: "Candidate staging branch (default: release-staging)"
+        type: string
+        default: "release-staging"
+        required: false
+      release-type:
+        description: "Legacy release type input (deprecated, preserved for backwards compatibility)"
+        type: string
+        default: ""
         required: false
       token:
-        description: "GitHub Token or PAT for release-please"
+        description: "GitHub Token or PAT for release authentication"
         type: string
         required: false
         default: ""
@@ -48,9 +58,31 @@ jobs:
       minor: ${{ steps.release.outputs.minor }}
       patch: ${{ steps.release.outputs.patch }}
     steps:
-      - name: Run release-please
-        id: release
-        uses: googleapis/release-please-action@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          release-type: ${{ inputs.release-type }}
+          fetch-depth: 0
           token: ${{ inputs.token != '' && inputs.token || secrets.RELEASE_PLEASE_TOKEN || secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Run repokit release
+        id: release
+        env:
+          GH_TOKEN: ${{ inputs.token != '' && inputs.token || secrets.RELEASE_PLEASE_TOKEN || secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ inputs.token != '' && inputs.token || secrets.RELEASE_PLEASE_TOKEN || secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          TARGET_BRANCH="${{ inputs.target-branch || 'main' }}"
+          STAGING_BRANCH="${{ inputs.staging-branch || 'release-staging' }}"
+
+          if [ -d "cmd/repokit" ]; then
+            echo "Running local repokit CLI..."
+            go run ./cmd/repokit release --target-branch "$TARGET_BRANCH" --staging-branch "$STAGING_BRANCH"
+          else
+            echo "Installing repokit from Cooper-Wallace/repokit@main..."
+            go install github.com/Cooper-Wallace/repokit/cmd/repokit@main
+            repokit release --target-branch "$TARGET_BRANCH" --staging-branch "$STAGING_BRANCH"
+          fi
