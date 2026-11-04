@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/Cooper-Wallace/repokit/compare/v1.0.0...v1.1.0) (2026-11-04)
+
+
+### Features
+
+* **templates:** embed PR audit trail, add operability sections, and exempt AgentVault ([#12](https://github.com/Cooper-Wallace/repokit/issues/12)) ([34458de](https://github.com/Cooper-Wallace/repokit/commit/34458deb09bb49f4988d8ff7f633b1411e47bfd5))
+
 ## 1.0.0 (2026-11-03)
 
 
