@@ -10,18 +10,21 @@ permissions:
   pull-requests: write
 
 jobs:
-  release-please:
+  release-stage:
     name: "Semantic Release Gate"
     uses: ./.github/workflows/reusable-release-prep.yml
     with:
-      release-type: "go"
+      staging-branch: "release-staging"
+      target-branch: "main"
+      token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GH_PAT || github.token }}
+    secrets: inherit
 
   package-release:
     name: "Package & Upload Assets"
-    needs: release-please
-    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    needs: release-stage
+    if: ${{ needs.release-stage.outputs.releases_created == 'true' }}
     uses: ./.github/workflows/reusable-release-go.yml
     with:
-      tag-name: ${{ needs.release-please.outputs.tag_name }}
+      tag-name: ${{ needs.release-stage.outputs.tag_name }}
       go-version: "1.23"
     secrets: inherit

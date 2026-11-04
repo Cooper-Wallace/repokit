@@ -10,8 +10,9 @@ permissions:
   pull-requests: write
 
 jobs:
-  release-please:
+  release-stage:
     name: "Semantic Release Gate"
     uses: {{governance_slug}}/.github/workflows/reusable-release-prep.yml@main
     with:
-      release-type: "maven"
+      staging-branch: "release-staging"
+      target-branch: "main"

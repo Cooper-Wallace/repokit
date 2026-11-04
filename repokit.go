@@ -9,7 +9,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Terminal ANSI color constants.
@@ -27,6 +30,7 @@ const (
 const (
 	DefaultGovernanceRepo = "Cooper-Wallace/repokit"
 	CommitPattern         = `^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_.-]+\))?!?: .+$`
+	DefaultStagingBranch  = "release-staging"
 
 	CommitMsgHook = `#!/usr/bin/env bash
 # Git commit-msg hook enforcing Conventional Commits
@@ -181,7 +185,7 @@ permissions:
   pull-requests: write
 
 jobs:
-  release-please:
+  release-stage:
     name: "Semantic Release Gate"
     uses: {{governance_slug}}/.github/workflows/reusable-release-prep.yml@main
     with:
@@ -389,10 +393,10 @@ func GetGitHubUser() (string, error) {
 	if code == 0 && strings.TrimSpace(stdout) != "" {
 		return strings.TrimSpace(stdout), nil
 	}
-	if err != nil {
-		return "", err
+	if owner := os.Getenv("GITHUB_REPOSITORY_OWNER"); owner != "" {
+		return owner, nil
 	}
-	return "", fmt.Errorf("failed to get github user: %s", strings.TrimSpace(stderr))
+	return "", fmt.Errorf("failed to get authenticated GitHub user: %v: %s", err, stderr)
 }
 
 // Archetype Management
@@ -1210,7 +1214,9 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 		if fileExists(releaseWorkflowPath) {
 			if relData, err := os.ReadFile(releaseWorkflowPath); err == nil {
 				relContent := string(relData)
-				if strings.Contains(relContent, "release-please") ||
+				if strings.Contains(relContent, "release-stage") ||
+					strings.Contains(relContent, "repokit release") ||
+					strings.Contains(relContent, "release-please") ||
 					strings.Contains(relContent, "reusable-release-") ||
 					strings.Contains(relContent, "action-gh-release") ||
 					strings.Contains(relContent, "goreleaser") {
@@ -1773,4 +1779,552 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 	fmt.Println()
 	LogSuccess("Repository configuration complete across %d repositories!", len(targetSlugs))
 	return nil
+}
+
+// Release Automation Types & Engine
+type ReleaseOptions struct {
+	Path          string
+	TargetBranch  string // defaults to "main"
+	StagingBranch string // defaults to DefaultStagingBranch ("release-staging")
+	DryRun        bool
+	OutputFile    string // defaults to os.Getenv("GITHUB_OUTPUT")
+}
+
+type ReleaseResult struct {
+	ReleasesCreated bool
+	TagName         string
+	Version         string
+	Major           int
+	Minor           int
+	Patch           int
+	ChangelogEntry  string
+}
+
+// ParseSemVer parses a semver tag (e.g. "v1.2.3" or "1.2.3") into major, minor, patch integers.
+func ParseSemVer(tag string) (major, minor, patch int, ok bool) {
+	tag = strings.TrimSpace(tag)
+	re := regexp.MustCompile(`^v?([0-9]+)\.([0-9]+)\.([0-9]+)$`)
+	m := re.FindStringSubmatch(tag)
+	if len(m) != 4 {
+		return 0, 0, 0, false
+	}
+	var err error
+	major, err = strconv.Atoi(m[1])
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	minor, err = strconv.Atoi(m[2])
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	patch, err = strconv.Atoi(m[3])
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	return major, minor, patch, true
+}
+
+// CalculateNextVersion calculates the next semver version based on Conventional Commits since currentTag.
+func CalculateNextVersion(currentTag string, commits []string) (major, minor, patch int, bumped bool) {
+	curMajor, curMinor, curPatch, _ := ParseSemVer(currentTag)
+
+	hasBreaking := false
+	hasFeat := false
+	hasFix := false
+
+	releaseRegex := regexp.MustCompile(`^chore\((?:release|main|staging)\): release`)
+	commitHeaderRegex := regexp.MustCompile(`^([a-zA-Z0-9_-]+)(?:\(([^\)]+)\))?(!)?:\s*(.+)$`)
+
+	for _, c := range commits {
+		line := strings.TrimSpace(c)
+		if line == "" {
+			continue
+		}
+		subject := line
+		if idx := strings.Index(line, "|"); idx != -1 {
+			subject = strings.TrimSpace(line[idx+1:])
+		}
+		if releaseRegex.MatchString(subject) {
+			continue
+		}
+
+		isBreaking := false
+		if strings.Contains(line, "BREAKING CHANGE:") || strings.Contains(line, "BREAKING-CHANGE:") {
+			isBreaking = true
+		}
+
+		match := commitHeaderRegex.FindStringSubmatch(subject)
+		if match != nil {
+			if match[3] == "!" {
+				isBreaking = true
+			}
+		}
+
+		if isBreaking {
+			hasBreaking = true
+		} else if match != nil {
+			typ := strings.ToLower(match[1])
+			switch typ {
+			case "feat":
+				hasFeat = true
+			case "fix", "perf", "refactor", "ci", "build":
+				hasFix = true
+			}
+		}
+	}
+
+	if !hasBreaking && !hasFeat && !hasFix {
+		return curMajor, curMinor, curPatch, false
+	}
+
+	if currentTag == "" || (curMajor == 0 && curMinor == 0 && curPatch == 0) {
+		return 1, 0, 0, true
+	}
+
+	if hasBreaking {
+		return curMajor + 1, 0, 0, true
+	}
+	if hasFeat {
+		return curMajor, curMinor + 1, 0, true
+	}
+	if hasFix {
+		return curMajor, curMinor, curPatch + 1, true
+	}
+
+	return curMajor, curMinor, curPatch, false
+}
+
+// FormatChangelogSection formats a markdown section for a release version.
+func FormatChangelogSection(version string, dateStr string, commits []string) string {
+	releaseRegex := regexp.MustCompile(`^chore\((?:release|main|staging)\): release`)
+	commitHeaderRegex := regexp.MustCompile(`^([a-zA-Z0-9_-]+)(?:\(([^\)]+)\))?(!)?:\s*(.+)$`)
+
+	var breaking []string
+	var features []string
+	var bugFixes []string
+	var perfRefactor []string
+	var maintenance []string
+
+	for _, c := range commits {
+		line := strings.TrimSpace(c)
+		if line == "" {
+			continue
+		}
+		var sha, subject string
+		if idx := strings.Index(line, "|"); idx != -1 {
+			sha = strings.TrimSpace(line[:idx])
+			subject = strings.TrimSpace(line[idx+1:])
+		} else {
+			subject = line
+		}
+
+		if releaseRegex.MatchString(subject) {
+			continue
+		}
+
+		isBreaking := false
+		if strings.Contains(line, "BREAKING CHANGE:") || strings.Contains(line, "BREAKING-CHANGE:") {
+			isBreaking = true
+		}
+
+		match := commitHeaderRegex.FindStringSubmatch(subject)
+		var scope, desc string
+		var typ string
+		if match != nil {
+			typ = strings.ToLower(match[1])
+			scope = match[2]
+			if match[3] == "!" {
+				isBreaking = true
+			}
+			desc = match[4]
+		} else {
+			desc = subject
+		}
+
+		var bullet string
+		if scope != "" {
+			if sha != "" {
+				bullet = fmt.Sprintf("* **%s:** %s (%s)", scope, desc, sha)
+			} else {
+				bullet = fmt.Sprintf("* **%s:** %s", scope, desc)
+			}
+		} else {
+			if sha != "" {
+				bullet = fmt.Sprintf("* %s (%s)", desc, sha)
+			} else {
+				bullet = fmt.Sprintf("* %s", desc)
+			}
+		}
+
+		if isBreaking {
+			breaking = append(breaking, bullet)
+		} else {
+			switch typ {
+			case "feat":
+				features = append(features, bullet)
+			case "fix":
+				bugFixes = append(bugFixes, bullet)
+			case "perf", "refactor":
+				perfRefactor = append(perfRefactor, bullet)
+			default:
+				maintenance = append(maintenance, bullet)
+			}
+		}
+	}
+
+	var sections []string
+	if len(breaking) > 0 {
+		sections = append(sections, "### Breaking Changes\n\n"+strings.Join(breaking, "\n"))
+	}
+	if len(features) > 0 {
+		sections = append(sections, "### Features\n\n"+strings.Join(features, "\n"))
+	}
+	if len(bugFixes) > 0 {
+		sections = append(sections, "### Bug Fixes\n\n"+strings.Join(bugFixes, "\n"))
+	}
+	if len(perfRefactor) > 0 {
+		sections = append(sections, "### Performance & Refactoring\n\n"+strings.Join(perfRefactor, "\n"))
+	}
+	if len(maintenance) > 0 {
+		sections = append(sections, "### Maintenance & CI\n\n"+strings.Join(maintenance, "\n"))
+	}
+
+	header := fmt.Sprintf("## %s (%s)\n\n", version, dateStr)
+	if len(sections) == 0 {
+		return fmt.Sprintf("## %s (%s)\n", version, dateStr)
+	}
+	return header + strings.Join(sections, "\n\n") + "\n"
+}
+
+// extractReleaseNotes extracts the release notes for a given version from CHANGELOG content.
+func extractReleaseNotes(content string, version string) string {
+	vTarget := strings.TrimPrefix(version, "v")
+	reHeader := regexp.MustCompile(`^## (?:\[)?v?` + regexp.QuoteMeta(vTarget) + `(?:\b|[ \(\[])`)
+	reAnySectionHeader := regexp.MustCompile(`^## `)
+
+	lines := strings.Split(content, "\n")
+	startIdx := -1
+	endIdx := -1
+
+	for i, line := range lines {
+		if startIdx == -1 {
+			if reHeader.MatchString(line) {
+				startIdx = i
+			}
+		} else {
+			if reAnySectionHeader.MatchString(line) {
+				endIdx = i
+				break
+			}
+		}
+	}
+
+	if startIdx != -1 {
+		if endIdx == -1 {
+			endIdx = len(lines)
+		}
+		if startIdx+1 <= endIdx {
+			notes := strings.TrimSpace(strings.Join(lines[startIdx+1:endIdx], "\n"))
+			if notes != "" {
+				return notes
+			}
+		}
+	}
+	return ""
+}
+
+// UpdateChangelogContent prepends newSection under # Changelog or replaces existing version block.
+func UpdateChangelogContent(existing string, version string, newSection string) string {
+	cleanNew := strings.TrimSpace(newSection)
+	vTarget := strings.TrimPrefix(version, "v")
+
+	if strings.TrimSpace(existing) == "" {
+		return "# Changelog\n\n" + cleanNew + "\n"
+	}
+
+	lines := strings.Split(existing, "\n")
+	startIdx := -1
+	endIdx := -1
+
+	reHeader := regexp.MustCompile(`^## (?:\[)?v?` + regexp.QuoteMeta(vTarget) + `(?:\b|[ \(\[])`)
+	reAnySectionHeader := regexp.MustCompile(`^## `)
+
+	for i, line := range lines {
+		if startIdx == -1 {
+			if reHeader.MatchString(line) {
+				startIdx = i
+			}
+		} else {
+			if reAnySectionHeader.MatchString(line) {
+				endIdx = i
+				break
+			}
+		}
+	}
+
+	if startIdx != -1 {
+		if endIdx == -1 {
+			endIdx = len(lines)
+		}
+		var newLines []string
+		newLines = append(newLines, lines[:startIdx]...)
+		newLines = append(newLines, cleanNew)
+		if endIdx < len(lines) {
+			newLines = append(newLines, "")
+			newLines = append(newLines, lines[endIdx:]...)
+		}
+		result := strings.Join(newLines, "\n")
+		return strings.TrimRight(result, "\n") + "\n"
+	}
+
+	reChangelog := regexp.MustCompile(`(?m)^# Changelog\s*$`)
+	loc := reChangelog.FindStringIndex(existing)
+	if loc != nil {
+		before := strings.TrimRight(existing[:loc[1]], "\n")
+		after := strings.TrimLeft(existing[loc[1]:], "\n")
+		if after != "" {
+			return before + "\n\n" + cleanNew + "\n\n" + after
+		}
+		return before + "\n\n" + cleanNew + "\n"
+	}
+
+	return "# Changelog\n\n" + cleanNew + "\n\n" + strings.TrimSpace(existing) + "\n"
+}
+
+func writeGitHubOutput(path string, kvs map[string]string) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	keys := make([]string, 0, len(kvs))
+	for k := range kvs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if _, err := fmt.Fprintf(f, "%s=%s\n", k, kvs[k]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ExecuteRelease runs either Mode A (Release Promotion) or Mode B (Release Staging).
+func ExecuteRelease(opts ReleaseOptions) (*ReleaseResult, error) {
+	repoRoot, err := GetGitRepoRoot(opts.Path)
+	if err != nil || repoRoot == "" {
+		if err == nil {
+			err = fmt.Errorf("not inside a git repository")
+		}
+		return nil, err
+	}
+
+	if opts.TargetBranch == "" {
+		opts.TargetBranch = "main"
+	}
+	if opts.StagingBranch == "" {
+		opts.StagingBranch = DefaultStagingBranch
+	}
+	if opts.OutputFile == "" {
+		opts.OutputFile = os.Getenv("GITHUB_OUTPUT")
+	}
+
+	headSubject, _, code, err := RunCmd([]string{"git", "log", "-1", "--format=%s"}, repoRoot)
+	if err != nil || code != 0 {
+		return nil, fmt.Errorf("failed to get HEAD commit: %w", err)
+	}
+	headSubject = strings.TrimSpace(headSubject)
+
+	reModeA := regexp.MustCompile(`^chore\((?:release|main|staging)\): release v?(\d+\.\d+\.\d+)`)
+	matchA := reModeA.FindStringSubmatch(headSubject)
+
+	if matchA != nil {
+		// Mode A: Release Promotion
+		version := matchA[1]
+		tagName := "v" + version
+		major, minor, patch, _ := ParseSemVer(version)
+
+		notes := "Release " + tagName
+		changelogPath := filepath.Join(repoRoot, "CHANGELOG.md")
+		if data, err := os.ReadFile(changelogPath); err == nil {
+			if extracted := extractReleaseNotes(string(data), version); extracted != "" {
+				notes = extracted
+			}
+		}
+
+		if !opts.DryRun {
+			_, _, tagCode, _ := RunCmd([]string{"git", "rev-parse", "-q", "--verify", "refs/tags/" + tagName}, repoRoot)
+			if tagCode != 0 {
+				RunCmd([]string{"git", "config", "user.name", "github-actions[bot]"}, repoRoot)
+				RunCmd([]string{"git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"}, repoRoot)
+				if _, _, code, err := RunCmd([]string{"git", "tag", "-a", tagName, "-m", "Release " + tagName}, repoRoot); err != nil || code != 0 {
+					return nil, fmt.Errorf("failed to create git tag %s: %w", tagName, err)
+				}
+				if _, _, code, err := RunCmd([]string{"git", "push", "origin", tagName}, repoRoot); err != nil || code != 0 {
+					return nil, fmt.Errorf("failed to push git tag %s: %w", tagName, err)
+				}
+			}
+
+			_, _, relCode, _ := RunCmd([]string{"gh", "release", "view", tagName}, repoRoot)
+			if relCode != 0 {
+				if _, _, code, err := RunCmd([]string{"gh", "release", "create", tagName, "--title", tagName, "--notes", notes}, repoRoot); err != nil || code != 0 {
+					return nil, fmt.Errorf("failed to create GitHub release %s: %w", tagName, err)
+				}
+			}
+		}
+
+		if opts.OutputFile != "" {
+			outputs := map[string]string{
+				"releases_created": "true",
+				"tag_name":         tagName,
+				"version":          version,
+				"major":            strconv.Itoa(major),
+				"minor":            strconv.Itoa(minor),
+				"patch":            strconv.Itoa(patch),
+			}
+			if err := writeGitHubOutput(opts.OutputFile, outputs); err != nil {
+				return nil, err
+			}
+		}
+
+		return &ReleaseResult{
+			ReleasesCreated: true,
+			TagName:         tagName,
+			Version:         version,
+			Major:           major,
+			Minor:           minor,
+			Patch:           patch,
+			ChangelogEntry:  notes,
+		}, nil
+	}
+
+	// Mode B: Release Staging to stagingBranch
+	tagOut, _, _, _ := RunCmd([]string{"git", "tag", "--list", "v*", "--sort=-v:refname"}, repoRoot)
+	var latestTag string
+	for _, line := range strings.Split(tagOut, "\n") {
+		t := strings.TrimSpace(line)
+		if _, _, _, ok := ParseSemVer(t); ok {
+			latestTag = t
+			break
+		}
+	}
+
+	var logArgs []string
+	if latestTag != "" {
+		logArgs = []string{"git", "log", fmt.Sprintf("%s..HEAD", latestTag), "--format=%h|%s"}
+	} else {
+		logArgs = []string{"git", "log", "--format=%h|%s"}
+	}
+
+	logOut, _, code, err := RunCmd(logArgs, repoRoot)
+	if err != nil || code != 0 {
+		return nil, fmt.Errorf("failed to query git log: %w", err)
+	}
+
+	var commits []string
+	for _, line := range strings.Split(logOut, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			commits = append(commits, line)
+		}
+	}
+
+	major, minor, patch, bumped := CalculateNextVersion(latestTag, commits)
+	if !bumped {
+		LogInfo("No releasable changes detected.")
+		if opts.OutputFile != "" {
+			_ = writeGitHubOutput(opts.OutputFile, map[string]string{
+				"releases_created": "false",
+			})
+		}
+		return &ReleaseResult{ReleasesCreated: false}, nil
+	}
+
+	version := fmt.Sprintf("%d.%d.%d", major, minor, patch)
+	tagName := "v" + version
+	dateStr := time.Now().UTC().Format("2006-01-02")
+	changelogSection := FormatChangelogSection(version, dateStr, commits)
+
+	changelogPath := filepath.Join(repoRoot, "CHANGELOG.md")
+	var existing string
+	if data, err := os.ReadFile(changelogPath); err == nil {
+		existing = string(data)
+	}
+	updatedChangelog := UpdateChangelogContent(existing, version, changelogSection)
+
+	if !opts.DryRun {
+		RunCmd([]string{"git", "config", "user.name", "github-actions[bot]"}, repoRoot)
+		RunCmd([]string{"git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"}, repoRoot)
+
+		if _, _, code, err := RunCmd([]string{"git", "checkout", "-B", opts.StagingBranch}, repoRoot); err != nil || code != 0 {
+			return nil, fmt.Errorf("failed to checkout staging branch %s: %w", opts.StagingBranch, err)
+		}
+
+		if err := os.WriteFile(changelogPath, []byte(updatedChangelog), 0644); err != nil {
+			return nil, fmt.Errorf("failed to write CHANGELOG.md: %w", err)
+		}
+
+		if _, _, code, err := RunCmd([]string{"git", "add", "CHANGELOG.md"}, repoRoot); err != nil || code != 0 {
+			return nil, fmt.Errorf("failed to git add CHANGELOG.md: %w", err)
+		}
+
+		commitMsg := fmt.Sprintf("chore(release): release %s", tagName)
+		if _, _, code, err := RunCmd([]string{"git", "commit", "-m", commitMsg}, repoRoot); err != nil || code != 0 {
+			return nil, fmt.Errorf("failed to commit changelog update: %w", err)
+		}
+
+		if _, _, code, err := RunCmd([]string{"git", "push", "--force", "origin", opts.StagingBranch}, repoRoot); err != nil || code != 0 {
+			return nil, fmt.Errorf("failed to push to %s: %w", opts.StagingBranch, err)
+		}
+
+		prOut, _, _, _ := RunCmd([]string{"gh", "pr", "list", "--head", opts.StagingBranch, "--base", opts.TargetBranch, "--state", "open", "--json", "number", "--jq", ".[0].number"}, repoRoot)
+		prTitle := fmt.Sprintf("chore(release): release %s", tagName)
+		prBody := fmt.Sprintf("## Release Staging: %s\n\n%s\n---\n\n## Quality Gates & Sign-Off Checklist\n- [ ] **Gate 1: Automated Quality Gates** (All CI checks pass)\n- [ ] **Gate 2: Agent Review Verification** (Adversarial diff review conducted; no regressions)\n- [ ] **Gate 3: Human Review & Manual Promotion** (PR reviewed by human developer; merge must only be triggered manually in the GitHub UI, never automated)\n", tagName, changelogSection)
+
+		prNum := strings.TrimSpace(prOut)
+		if prNum != "" && prNum != "null" {
+			if _, _, code, err := RunCmd([]string{"gh", "pr", "edit", prNum, "--title", prTitle, "--body", prBody}, repoRoot); err != nil || code != 0 {
+				return nil, fmt.Errorf("failed to edit PR #%s: %w", prNum, err)
+			}
+		} else {
+			if _, _, code, err := RunCmd([]string{"gh", "pr", "create", "--base", opts.TargetBranch, "--head", opts.StagingBranch, "--title", prTitle, "--body", prBody}, repoRoot); err != nil || code != 0 {
+				return nil, fmt.Errorf("failed to create release PR: %w", err)
+			}
+		}
+
+		RunCmd([]string{"gh", "workflow", "run", "semantic-pr.yml", "--ref", opts.StagingBranch}, repoRoot)
+		RunCmd([]string{"git", "checkout", opts.TargetBranch}, repoRoot)
+	}
+
+	if opts.OutputFile != "" {
+		outputs := map[string]string{
+			"releases_created": "false",
+			"tag_name":         tagName,
+			"version":          version,
+			"major":            strconv.Itoa(major),
+			"minor":            strconv.Itoa(minor),
+			"patch":            strconv.Itoa(patch),
+		}
+		if err := writeGitHubOutput(opts.OutputFile, outputs); err != nil {
+			return nil, err
+		}
+	}
+
+	return &ReleaseResult{
+		ReleasesCreated: false,
+		TagName:         tagName,
+		Version:         version,
+		Major:           major,
+		Minor:           minor,
+		Patch:           patch,
+		ChangelogEntry:  changelogSection,
+	}, nil
 }

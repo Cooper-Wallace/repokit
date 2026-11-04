@@ -10,17 +10,18 @@ permissions:
   pull-requests: write
 
 jobs:
-  release-please:
+  release-stage:
     name: "Semantic Release Gate"
     uses: {{governance_slug}}/.github/workflows/reusable-release-prep.yml@main
     with:
-      release-type: "node"
+      staging-branch: "release-staging"
+      target-branch: "main"
 
   package-release:
     name: "Package & Upload Assets"
-    needs: release-please
-    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    needs: release-stage
+    if: ${{ needs.release-stage.outputs.releases_created == 'true' }}
     uses: {{governance_slug}}/.github/workflows/reusable-release-typescript.yml@main
     with:
-      tag-name: ${{ needs.release-please.outputs.tag_name }}
+      tag-name: ${{ needs.release-stage.outputs.tag_name }}
       node-version: "20"

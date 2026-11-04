@@ -34,6 +34,11 @@ For solo developers, engineers, and researchers, pushing directly to `main` with
   - Installs an executable `.git/hooks/pre-commit` hook that audits repository structure before commits.
 - **Automated CI Quality Gates**:
   - Scaffolds `.github/workflows/semantic-pr.yml` to ensure PR titles strictly adhere to Conventional Commits.
+- **Native Release Staging & Promotion Engine**:
+  - Replaces external release actions with a native, zero-dependency release engine.
+  - Automatically calculates SemVer increments from Conventional Commits.
+  - Generates and updates `CHANGELOG.md` with candidate PRs (`release-staging` -> `main`).
+  - Automatically tags releases and creates GitHub Releases upon human squash-merge to `main`.
 - **Standardised Scaffolding**:
   - Scaffolds structured PR templates (`.github/pull_request_template.md`), `.gitignore`, and portfolio-ready documentation.
 - **Multi-Mode Audit Engine**:
@@ -192,6 +197,31 @@ repokit hook install --all
 
 ---
 
+## 6. Semantic Release Staging & Promotion
+Manage automated Conventional Commit release staging and promotion:
+
+```bash
+# Run release staging or promotion for current repository:
+repokit release
+
+# Specify custom target and candidate staging branches:
+repokit release --target-branch main --staging-branch release-staging
+
+# Dry-run inspection without pushing tags or opening candidate PRs:
+repokit release --dry-run
+```
+
+### Native Release Staging & Promotion Lifecycle
+
+`repokit` provides a native, zero-dependency release automation engine that replaces external release-please workflows:
+
+- **Stage 1: Candidate Release Staging**: Push or PR merge to `main` triggers candidate release staging to the candidate staging branch (`release-staging`).
+- **Stage 2: Commit Inspection & Changelog Generation**: `repokit release` inspects Conventional Commits since the last `v*` tag, bumps SemVer (`fix` -> patch, `feat` -> minor, `BREAKING CHANGE` or `!` -> major), updates `CHANGELOG.md`, and creates or updates a candidate PR from `release-staging` to `main`.
+- **Stage 3: Human Review & Manual Squash-Merge**: Human review & manual squash-merge of `release-staging` PR into `main`. Direct bot auto-merging is disallowed to preserve human gatekeeping.
+- **Stage 4: Release Promotion & Asset Packaging**: On merge to `main`, `repokit release` promotes the release: tags `vX.Y.Z`, creates GitHub Release with release notes, and triggers packaging/asset uploads (`package-release`).
+
+---
+
 ## Central Governance Propagation & Automated Sync
 
 `repokit` provides bidirectional automated synchronization between central governance (`Cooper-Wallace/repokit`) and all downstream archetype repositories (Go, Python, TypeScript, Bash, Java).
@@ -248,6 +278,9 @@ Once your repository is standardised, your daily workflow remains fast and clean
      ```
    - Complete the Quality Gates & Sign-Off Checklist on the PR (automated CI, agent review verification, and human review).
    - Manually squash-merge the Pull Request via the GitHub web UI once all quality gates pass. Automated merging (`gh pr merge`) is intentionally disallowed to preserve human gatekeeping.
+5. **Release Staging & Promotion**:
+   - Pushes to `main` automatically stage candidate releases to `release-staging` via `repokit release`.
+   - When ready for release, review the candidate PR, inspect the changelog, and squash-merge it to `main` to trigger automated tagging (`vX.Y.Z`), GitHub Release publication, and asset uploads.
 
 ---
 
