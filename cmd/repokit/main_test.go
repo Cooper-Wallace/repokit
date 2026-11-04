@@ -160,6 +160,14 @@ func TestConfigureDiscoveryCLI(t *testing.T) {
 	if code := run([]string{"configure", "--repos=r1,r2", "--path=" + tmpDir, "-f", "--pr", "--dry-run"}); code != 0 {
 		t.Errorf("Expected 0 for configure with inline flags, got %d", code)
 	}
+
+	if code := run([]string{"configure", "--dry-run", "--repos", "r1,r2", "--direct", "--release-ref", "v1.1.0"}); code != 0 {
+		t.Errorf("Expected 0 for configure --dry-run --direct --release-ref, got %d", code)
+	}
+
+	if code := run([]string{"configure", "--dry-run", "--repos=r1", "--push-main", "--release-ref=v1.1.0"}); code != 0 {
+		t.Errorf("Expected 0 for configure --dry-run --push-main --release-ref=..., got %d", code)
+	}
 }
 
 func TestReleaseCLI(t *testing.T) {

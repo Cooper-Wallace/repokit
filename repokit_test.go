@@ -663,6 +663,15 @@ func TestApplyBranchRuleset(t *testing.T) {
 		var payload map[string]interface{}
 		_ = json.Unmarshal([]byte(capturedInput), &payload)
 
+		bypassActors, ok := payload["bypass_actors"].([]interface{})
+		if !ok || len(bypassActors) == 0 {
+			t.Fatalf("Expected bypass_actors in payload, got %v", payload["bypass_actors"])
+		}
+		actor0 := bypassActors[0].(map[string]interface{})
+		if actor0["actor_id"] != float64(5) || actor0["actor_type"] != "RepositoryRole" || actor0["bypass_mode"] != "always" {
+			t.Errorf("Expected bypass_actors with actor_id: 5 and RepositoryRole, got %v", actor0)
+		}
+
 		rules := payload["rules"].([]interface{})
 		var hasStatusChecks, hasPRSquash bool
 		for _, r := range rules {
@@ -707,6 +716,15 @@ func TestApplyBranchRuleset(t *testing.T) {
 
 		var payload map[string]interface{}
 		_ = json.Unmarshal([]byte(capturedInput), &payload)
+
+		bypassActors, ok := payload["bypass_actors"].([]interface{})
+		if !ok || len(bypassActors) == 0 {
+			t.Fatalf("Expected bypass_actors in payload, got %v", payload["bypass_actors"])
+		}
+		actor0 := bypassActors[0].(map[string]interface{})
+		if actor0["actor_id"] != float64(5) || actor0["actor_type"] != "RepositoryRole" || actor0["bypass_mode"] != "always" {
+			t.Errorf("Expected bypass_actors with actor_id: 5 and RepositoryRole, got %v", actor0)
+		}
 
 		rules := payload["rules"].([]interface{})
 		for _, r := range rules {
@@ -1144,6 +1162,65 @@ func TestConfigureRepository(t *testing.T) {
 		prTemplate := filepath.Join(gitDir, ".github", "pull_request_template.md")
 		if !fileExists(prTemplate) {
 			t.Errorf("Expected PR template to be scaffolded")
+		}
+	})
+
+	t.Run("direct_commit", func(t *testing.T) {
+		gitDir := t.TempDir()
+		cmd := exec.Command("git", "init", "-b", "main")
+		cmd.Dir = gitDir
+		_ = cmd.Run()
+		cmd = exec.Command("git", "remote", "add", "origin", "https://github.com/Cooper-Wallace/test-repo.git")
+		cmd.Dir = gitDir
+		_ = cmd.Run()
+		cmd = exec.Command("git", "config", "user.name", "Test")
+		cmd.Dir = gitDir
+		_ = cmd.Run()
+		cmd = exec.Command("git", "config", "user.email", "test@test.com")
+		cmd.Dir = gitDir
+		_ = cmd.Run()
+
+		var gitCheckoutMain bool
+		var gitPushedMain bool
+		var commitMsg string
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 0 && args[0] == "git" {
+				for i, a := range args {
+					if a == "checkout" && i+1 < len(args) && args[i+1] == "main" {
+						gitCheckoutMain = true
+						return "", "", 0, nil
+					}
+					if a == "commit" && i+2 < len(args) && args[i+1] == "-m" {
+						commitMsg = args[i+2]
+					}
+					if a == "push" && i+2 < len(args) && args[i+1] == "origin" && args[i+2] == "main" {
+						gitPushedMain = true
+						return "", "", 0, nil
+					}
+				}
+				return defaultCommandRunner(args, dir, input)
+			}
+			return "[]", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			TargetDir:    gitDir,
+			Force:        true,
+			DirectCommit: true,
+			ReleaseRef:   "v1.0.0",
+		})
+		if err != nil {
+			t.Fatalf("ConfigureWithOptions direct commit failed: %v", err)
+		}
+		if !gitCheckoutMain {
+			t.Errorf("Expected git checkout main")
+		}
+		if !gitPushedMain {
+			t.Errorf("Expected git push origin main")
+		}
+		if !strings.Contains(commitMsg, "v1.0.0") {
+			t.Errorf("Expected commit message with v1.0.0, got: %s", commitMsg)
 		}
 	})
 
@@ -1785,6 +1862,117 @@ func TestConfigureWithOptions(t *testing.T) {
 		}
 	})
 
+	t.Run("local_discovery_and_direct_commit", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		repoA := filepath.Join(tmpDir, "repo-local")
+		_ = os.MkdirAll(repoA, 0755)
+
+		cInit := exec.Command("git", "init", "-b", "main")
+		cInit.Dir = repoA
+		_ = cInit.Run()
+		cRemote := exec.Command("git", "remote", "add", "origin", "https://github.com/user/repo-local.git")
+		cRemote.Dir = repoA
+		_ = cRemote.Run()
+		cConfigU := exec.Command("git", "config", "user.name", "Test")
+		cConfigU.Dir = repoA
+		_ = cConfigU.Run()
+		cConfigE := exec.Command("git", "config", "user.email", "test@test.com")
+		cConfigE.Dir = repoA
+		_ = cConfigE.Run()
+
+		var gitCheckoutMain bool
+		var gitPushedMain bool
+		var commitMsg string
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 0 && args[0] == "git" {
+				for i, a := range args {
+					if a == "checkout" && i+1 < len(args) && args[i+1] == "main" {
+						gitCheckoutMain = true
+						return "", "", 0, nil
+					}
+					if a == "commit" && i+2 < len(args) && args[i+1] == "-m" {
+						commitMsg = args[i+2]
+					}
+					if a == "push" && i+2 < len(args) && args[i+1] == "origin" && args[i+2] == "main" {
+						gitPushedMain = true
+						return "", "", 0, nil
+					}
+				}
+				return defaultCommandRunner(args, dir, input)
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			Local:        true,
+			LocalDir:     tmpDir,
+			DirectCommit: true,
+			ReleaseRef:   "v1.2.0",
+		})
+		if err != nil {
+			t.Fatalf("ConfigureWithOptions local direct commit failed: %v", err)
+		}
+		if !gitCheckoutMain {
+			t.Errorf("Expected checkout of main")
+		}
+		if !gitPushedMain {
+			t.Errorf("Expected git push origin main")
+		}
+		if !strings.Contains(commitMsg, "sync governance standards and workflows to v1.2.0") {
+			t.Errorf("Expected commit message with release ref v1.2.0, got: %s", commitMsg)
+		}
+	})
+
+	t.Run("ephemeral_clone_and_direct_commit", func(t *testing.T) {
+		var clonedRepo string
+		var gitPushedMain bool
+		var commitMsg string
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 4 && args[0] == "gh" && args[1] == "repo" && args[2] == "clone" {
+				clonedRepo = args[3]
+				dest := args[4]
+				_ = exec.Command("git", "init", "-b", "main", dest).Run()
+				_ = exec.Command("git", "-C", dest, "remote", "add", "origin", "https://github.com/"+clonedRepo+".git").Run()
+				_ = exec.Command("git", "-C", dest, "config", "user.name", "Test").Run()
+				_ = exec.Command("git", "-C", dest, "config", "user.email", "test@test.com").Run()
+				return "", "", 0, nil
+			}
+			if len(args) > 0 && args[0] == "git" {
+				for i, a := range args {
+					if a == "commit" && i+2 < len(args) && args[i+1] == "-m" {
+						commitMsg = args[i+2]
+					}
+					if a == "push" && i+2 < len(args) && args[i+1] == "origin" && args[i+2] == "main" {
+						gitPushedMain = true
+						return "", "", 0, nil
+					}
+				}
+				return defaultCommandRunner(args, dir, input)
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			Repos:        []string{"user/remote-sync-repo"},
+			DirectCommit: true,
+			ReleaseRef:   "v1.0.0",
+		})
+		if err != nil {
+			t.Fatalf("Ephemeral clone direct commit failed: %v", err)
+		}
+		if clonedRepo != "user/remote-sync-repo" {
+			t.Errorf("Expected ephemeral clone of user/remote-sync-repo, got %q", clonedRepo)
+		}
+		if !gitPushedMain {
+			t.Errorf("Expected push to origin main")
+		}
+		if !strings.Contains(commitMsg, "v1.0.0") {
+			t.Errorf("Expected commit message to contain v1.0.0, got %s", commitMsg)
+		}
+	})
+
 	t.Run("all_discovery", func(t *testing.T) {
 		var listedUser bool
 		var configuredSlugs []string
@@ -2165,9 +2353,17 @@ func TestExecuteRelease(t *testing.T) {
 		// Verify git tag & push, and gh release create were called
 		foundTag := false
 		foundGhRelease := false
+		foundMajorTag := false
+		foundMajorPush := false
 		for _, cmd := range executedCmds {
 			if len(cmd) >= 3 && cmd[0] == "git" && cmd[1] == "tag" && cmd[2] == "-a" {
 				foundTag = true
+			}
+			if len(cmd) >= 5 && cmd[0] == "git" && cmd[1] == "tag" && cmd[2] == "-f" && cmd[3] == "-a" && cmd[4] == "v1" {
+				foundMajorTag = true
+			}
+			if len(cmd) >= 5 && cmd[0] == "git" && cmd[1] == "push" && cmd[2] == "--force" && cmd[3] == "origin" && cmd[4] == "v1" {
+				foundMajorPush = true
 			}
 			if len(cmd) >= 3 && cmd[0] == "gh" && cmd[1] == "release" && cmd[2] == "create" {
 				foundGhRelease = true
@@ -2175,6 +2371,12 @@ func TestExecuteRelease(t *testing.T) {
 		}
 		if !foundTag {
 			t.Errorf("Expected git tag -a to be executed")
+		}
+		if !foundMajorTag {
+			t.Errorf("Expected floating major tag git tag -f -a v1 to be executed")
+		}
+		if !foundMajorPush {
+			t.Errorf("Expected floating major tag push git push --force origin v1 to be executed")
 		}
 		if !foundGhRelease {
 			t.Errorf("Expected gh release create to be executed")
@@ -2233,6 +2435,8 @@ func TestExecuteRelease(t *testing.T) {
 		foundPrCreate := false
 		foundCheckoutStaging := false
 		foundCheckoutMain := false
+		foundSemanticPR := false
+		foundTestWorkflow := false
 		for _, cmd := range executedCmds {
 			if len(cmd) >= 4 && cmd[0] == "gh" && cmd[1] == "pr" && cmd[2] == "create" {
 				foundPrCreate = true
@@ -2243,6 +2447,12 @@ func TestExecuteRelease(t *testing.T) {
 			if len(cmd) >= 3 && cmd[0] == "git" && cmd[1] == "checkout" && cmd[2] == "main" {
 				foundCheckoutMain = true
 			}
+			if len(cmd) >= 5 && cmd[0] == "gh" && cmd[1] == "workflow" && cmd[2] == "run" && cmd[3] == "semantic-pr.yml" {
+				foundSemanticPR = true
+			}
+			if len(cmd) >= 5 && cmd[0] == "gh" && cmd[1] == "workflow" && cmd[2] == "run" && cmd[3] == "test.yml" {
+				foundTestWorkflow = true
+			}
 		}
 		if !foundCheckoutStaging {
 			t.Errorf("Expected git checkout -B release-staging")
@@ -2252,6 +2462,12 @@ func TestExecuteRelease(t *testing.T) {
 		}
 		if !foundCheckoutMain {
 			t.Errorf("Expected git checkout main back to target branch")
+		}
+		if !foundSemanticPR {
+			t.Errorf("Expected gh workflow run semantic-pr.yml")
+		}
+		if !foundTestWorkflow {
+			t.Errorf("Expected gh workflow run test.yml")
 		}
 	})
 
