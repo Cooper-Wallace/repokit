@@ -3,6 +3,12 @@
 *~
 *.swp
 
+# Test coverage
+coverage.out
+.coverage
+htmlcov/
+coverage/
+
 # Editor config
 .vscode/*
 !.vscode/settings.json

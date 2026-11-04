@@ -1,5 +1,8 @@
 # Go build & coverage artifacts
 coverage.out
+.coverage
+htmlcov/
+coverage/
 bin/repokit
 dist/
 

@@ -313,6 +313,88 @@ jobs:
 	if string(contentBytes2) != content {
 		t.Errorf("File changed on second run")
 	}
+
+	t.Run("patch_inline_ci_job_name", func(t *testing.T) {
+		inlineTarget := t.TempDir()
+		inlineCI := filepath.Join(inlineTarget, "ci.yml")
+		inlineContent := `name: CI
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  validate-pr:
+    if: github.event_name == 'pull_request'
+    uses: Cooper-Wallace/repokit/.github/workflows/semantic-pr.yml@main
+
+  ci:
+    name: "Test & Coverage"
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest
+`
+		if err := os.WriteFile(inlineCI, []byte(inlineContent), 0644); err != nil {
+			t.Fatalf("failed to write test ci.yml: %v", err)
+		}
+
+		patched, err := PatchCIWorkflowPRGuard(inlineCI)
+		if err != nil {
+			t.Fatalf("PatchCIWorkflowPRGuard failed: %v", err)
+		}
+		if !patched {
+			t.Errorf("Expected patch to return true for inline ci: job name")
+		}
+
+		cb, _ := os.ReadFile(inlineCI)
+		cStr := string(cb)
+		if !strings.Contains(cStr, `name: "ci / Test & Coverage"`) {
+			t.Errorf("Expected patched job name 'ci / Test & Coverage', got:\n%s", cStr)
+		}
+
+		// Idempotency check
+		patchedAgain, err := PatchCIWorkflowPRGuard(inlineCI)
+		if err != nil {
+			t.Fatalf("Second PatchCIWorkflowPRGuard failed: %v", err)
+		}
+		if patchedAgain {
+			t.Errorf("Expected second run to be idempotent (false), got true")
+		}
+	})
+
+	t.Run("patch_inline_ci_job_name_unquoted", func(t *testing.T) {
+		inlineTarget := t.TempDir()
+		inlineCI := filepath.Join(inlineTarget, "ci.yml")
+		inlineContent := `name: CI
+
+on:
+  push:
+
+jobs:
+  ci:
+    name: Test & Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest
+`
+		if err := os.WriteFile(inlineCI, []byte(inlineContent), 0644); err != nil {
+			t.Fatalf("failed to write test ci.yml: %v", err)
+		}
+
+		patched, err := PatchCIWorkflowPRGuard(inlineCI)
+		if err != nil {
+			t.Fatalf("PatchCIWorkflowPRGuard failed: %v", err)
+		}
+		if !patched {
+			t.Errorf("Expected patch to return true for unquoted inline ci: job name")
+		}
+
+		cb, _ := os.ReadFile(inlineCI)
+		cStr := string(cb)
+		if !strings.Contains(cStr, `name: "ci / Test & Coverage"`) {
+			t.Errorf("Expected patched job name 'ci / Test & Coverage', got:\n%s", cStr)
+		}
+	})
 }
 
 func TestAuditLocalFast(t *testing.T) {
@@ -444,6 +526,8 @@ func TestPRTemplateContainsQualityGates(t *testing.T) {
 		"Gate 2: Agent Review Verification",
 		"Gate 3: Human Review & Manual Promotion",
 		"never automated",
+		"## Subagent Commit Trail",
+		"## Gate 2: Phase 3 Adversarial Review Summary",
 	}
 
 	for _, term := range expectedTerms {
@@ -637,6 +721,56 @@ func TestApplyBranchRuleset(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("exempt_vault_repo", func(t *testing.T) {
+		var calls [][]string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			calls = append(calls, args)
+			return "[]", "", 0, nil
+		}
+
+		err := ApplyBranchRuleset("Cooper-Wallace/AgentVault", "~DEFAULT_BRANCH", nil)
+		if err != nil {
+			t.Fatalf("ApplyBranchRuleset should succeed for exempt vault repo: %v", err)
+		}
+		if len(calls) != 0 {
+			t.Errorf("Expected 0 gh calls for exempt vault repo, got %d", len(calls))
+		}
+	})
+}
+
+func TestIsVaultOrExemptRepo(t *testing.T) {
+	cases := []struct {
+		slug     string
+		expected bool
+	}{
+		{"Cooper-Wallace/AgentVault", true},
+		{"Cooper-Wallace/agentvault", true},
+		{"Cooper-Wallace/agent-vault", true},
+		{"Cooper-Wallace/Agent-Vault", true},
+		{"agentvault", true},
+		{"agent-vault", true},
+		{"AgentVault", true},
+		{"Agent-Vault", true},
+		{"Cooper-Wallace/agentkit", false},
+		{"Cooper-Wallace/repokit", false},
+		{"agentkit", false},
+		{"my-agent-vault-app", false},
+		{"", false},
+	}
+
+	for _, tc := range cases {
+		name := tc.slug
+		if name == "" {
+			name = "empty_slug"
+		}
+		t.Run(name, func(t *testing.T) {
+			actual := IsVaultOrExemptRepo(tc.slug)
+			if actual != tc.expected {
+				t.Errorf("IsVaultOrExemptRepo(%q) = %v; want %v", tc.slug, actual, tc.expected)
+			}
+		})
+	}
 }
 
 func TestAuditRepositoryRemote(t *testing.T) {
@@ -997,6 +1131,41 @@ func TestConfigureRepository(t *testing.T) {
 		prTemplate := filepath.Join(gitDir, ".github", "pull_request_template.md")
 		if !fileExists(prTemplate) {
 			t.Errorf("Expected PR template to be scaffolded")
+		}
+	})
+
+	t.Run("exempt_vault_repo", func(t *testing.T) {
+		gitDir := t.TempDir()
+		cmd := exec.Command("git", "init", "-b", "main")
+		cmd.Dir = gitDir
+		_ = cmd.Run()
+		cmd = exec.Command("git", "remote", "add", "origin", "https://github.com/Cooper-Wallace/AgentVault.git")
+		cmd.Dir = gitDir
+		_ = cmd.Run()
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 0 && args[0] == "git" {
+				return defaultCommandRunner(args, dir, input)
+			}
+			return "[]", "", 0, nil
+		}
+
+		err := ConfigureRepository(gitDir, true)
+		if err != nil {
+			t.Fatalf("ConfigureRepository failed: %v", err)
+		}
+
+		ciFile := filepath.Join(gitDir, ".github", "workflows", "ci.yml")
+		if fileExists(ciFile) {
+			t.Errorf("CI workflow should not be scaffolded for exempt vault repo")
+		}
+		relFile := filepath.Join(gitDir, ".github", "workflows", "release.yml")
+		if fileExists(relFile) {
+			t.Errorf("Release workflow should not be scaffolded for exempt vault repo")
+		}
+		prTemplate := filepath.Join(gitDir, ".github", "pull_request_template.md")
+		if fileExists(prTemplate) {
+			t.Errorf("PR template should not be scaffolded for exempt vault repo")
 		}
 	})
 }
@@ -1637,8 +1806,91 @@ func TestConfigureWithOptions(t *testing.T) {
 			t.Errorf("Expected configuration API calls for discovered repos")
 		}
 	})
+
+	t.Run("exempt_vault_in_multiple_repos", func(t *testing.T) {
+		var configuredSlugs []string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 2 && args[0] == "gh" && args[1] == "api" {
+				for _, a := range args {
+					if strings.Contains(a, "AgentVault") {
+						configuredSlugs = append(configuredSlugs, a)
+					}
+				}
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			Repos: []string{"Cooper-Wallace/AgentVault"},
+		})
+		if err != nil {
+			t.Fatalf("ConfigureWithOptions failed: %v", err)
+		}
+		if len(configuredSlugs) > 0 {
+			t.Errorf("Expected 0 API calls for exempt vault repo in multiple repos, got %v", configuredSlugs)
+		}
+	})
 }
 
 func TestPropagateRepositories(t *testing.T) {
 	TestConfigureWithOptions(t)
+}
+
+func TestArchetypeEnterpriseOperabilityAndCoverage(t *testing.T) {
+	archetypes := []string{"python", "go", "typescript", "bash", "java"}
+
+	for _, arch := range archetypes {
+		t.Run(arch+"/readme_operability", func(t *testing.T) {
+			readmePath := fmt.Sprintf("templates/%s/README.md", arch)
+			data, err := TemplatesFS.ReadFile(readmePath)
+			if err != nil {
+				t.Fatalf("Failed to read %s: %v", readmePath, err)
+			}
+			content := string(data)
+			requiredSections := []string{
+				"## Example Workflow",
+				"## Configuration, Failure Modes & Safe Degrade Behavior",
+				"## Known Limitations",
+			}
+			for _, sec := range requiredSections {
+				if !strings.Contains(content, sec) {
+					t.Errorf("%s missing required section: %s", readmePath, sec)
+				}
+			}
+		})
+
+		t.Run(arch+"/gitignore_coverage", func(t *testing.T) {
+			giPath := fmt.Sprintf("templates/%s/.gitignore", arch)
+			data, err := TemplatesFS.ReadFile(giPath)
+			if err != nil {
+				t.Fatalf("Failed to read %s: %v", giPath, err)
+			}
+			content := string(data)
+			requiredEntries := []string{
+				"coverage.out",
+				".coverage",
+				"htmlcov/",
+				"coverage/",
+			}
+			for _, entry := range requiredEntries {
+				if !strings.Contains(content, entry) {
+					t.Errorf("%s missing coverage entry: %s", giPath, entry)
+				}
+			}
+		})
+	}
+
+	t.Run("default_gitignore_coverage", func(t *testing.T) {
+		requiredEntries := []string{
+			"coverage.out",
+			".coverage",
+			"htmlcov/",
+			"coverage/",
+		}
+		for _, entry := range requiredEntries {
+			if !strings.Contains(DefaultGitignore, entry) {
+				t.Errorf("DefaultGitignore missing coverage entry: %s", entry)
+			}
+		}
+	})
 }
