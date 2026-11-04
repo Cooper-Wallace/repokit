@@ -43,4 +43,4 @@ checksum:
   algorithm: sha256
 
 changelog:
-  skip: true
+  disable: true

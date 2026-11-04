@@ -8,6 +8,11 @@ on:
         type: string
         default: "simple"
         required: false
+      token:
+        description: "GitHub Token or PAT for release-please"
+        type: string
+        required: false
+        default: ""
     outputs:
       releases_created:
         description: "Whether a release was created"
@@ -48,3 +53,4 @@ jobs:
         uses: googleapis/release-please-action@v4
         with:
           release-type: ${{ inputs.release-type }}
+          token: ${{ inputs.token != '' && inputs.token || secrets.RELEASE_PLEASE_TOKEN || secrets.GH_PAT || secrets.GITHUB_TOKEN }}

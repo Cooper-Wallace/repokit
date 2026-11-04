@@ -1062,7 +1062,16 @@ func TestGetGitHubUser(t *testing.T) {
 	oldRunner := CommandRunner
 	defer func() { CommandRunner = oldRunner }()
 
+	t.Run("env_owner_override", func(t *testing.T) {
+		t.Setenv("GITHUB_REPOSITORY_OWNER", "ci-owner")
+		user, err := GetGitHubUser()
+		if err != nil || user != "ci-owner" {
+			t.Errorf("Expected user ci-owner from GITHUB_REPOSITORY_OWNER, got %s, err=%v", user, err)
+		}
+	})
+
 	t.Run("success", func(t *testing.T) {
+		t.Setenv("GITHUB_REPOSITORY_OWNER", "")
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			return "cooperwallace\n", "", 0, nil
 		}
@@ -1073,6 +1082,7 @@ func TestGetGitHubUser(t *testing.T) {
 	})
 
 	t.Run("failure", func(t *testing.T) {
+		t.Setenv("GITHUB_REPOSITORY_OWNER", "")
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			return "", "not logged in", 1, fmt.Errorf("exit status 1")
 		}

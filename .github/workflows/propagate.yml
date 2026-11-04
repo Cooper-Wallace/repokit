@@ -52,7 +52,13 @@ jobs:
       - name: Execute repokit configure
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ -z "$GH_PAT" ]; then
+            echo "No GH_PAT secret configured; skipping automated push propagation to prevent cross-repo auth failures. Use workflow_dispatch with a PAT."
+            exit 0
+          fi
+
           TARGETS="${{ inputs.target_repos }}"
           if [ -z "$TARGETS" ]; then
             TARGETS="all"
