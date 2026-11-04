@@ -1908,3 +1908,481 @@ func TestArchetypeEnterpriseOperabilityAndCoverage(t *testing.T) {
 		}
 	})
 }
+
+func TestParseSemVer(t *testing.T) {
+	cases := []struct {
+		tag       string
+		wantMajor int
+		wantMinor int
+		wantPatch int
+		wantOk    bool
+	}{
+		{"v1.2.3", 1, 2, 3, true},
+		{"1.2.3", 1, 2, 3, true},
+		{"v0.0.1", 0, 0, 1, true},
+		{"v0.0.0", 0, 0, 0, true},
+		{"v10.20.30", 10, 20, 30, true},
+		{"v1.2", 0, 0, 0, false},
+		{"1.2", 0, 0, 0, false},
+		{"v1.2.3.4", 0, 0, 0, false},
+		{"", 0, 0, 0, false},
+		{"v1.2.a", 0, 0, 0, false},
+		{"v1.2.3-beta", 0, 0, 0, false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.tag, func(t *testing.T) {
+			major, minor, patch, ok := ParseSemVer(c.tag)
+			if ok != c.wantOk {
+				t.Fatalf("ParseSemVer(%q) ok = %v, want %v", c.tag, ok, c.wantOk)
+			}
+			if ok && (major != c.wantMajor || minor != c.wantMinor || patch != c.wantPatch) {
+				t.Errorf("ParseSemVer(%q) = (%d, %d, %d), want (%d, %d, %d)", c.tag, major, minor, patch, c.wantMajor, c.wantMinor, c.wantPatch)
+			}
+		})
+	}
+}
+
+func TestCalculateNextVersion(t *testing.T) {
+	t.Run("first release on empty tag", func(t *testing.T) {
+		major, minor, patch, bumped := CalculateNextVersion("", []string{"feat: first feature"})
+		if !bumped || major != 1 || minor != 0 || patch != 0 {
+			t.Errorf("Expected 1.0.0 bumped, got %d.%d.%d, bumped=%v", major, minor, patch, bumped)
+		}
+
+		major, minor, patch, bumped = CalculateNextVersion("", []string{"fix: first fix"})
+		if !bumped || major != 1 || minor != 0 || patch != 0 {
+			t.Errorf("Expected 1.0.0 bumped for initial fix, got %d.%d.%d, bumped=%v", major, minor, patch, bumped)
+		}
+
+		major, minor, patch, bumped = CalculateNextVersion("", []string{"feat!: first breaking"})
+		if !bumped || major != 1 || minor != 0 || patch != 0 {
+			t.Errorf("Expected 1.0.0 bumped for initial breaking, got %d.%d.%d, bumped=%v", major, minor, patch, bumped)
+		}
+
+		_, _, _, bumped = CalculateNextVersion("", []string{"docs: update readme", "chore: setup"})
+		if bumped {
+			t.Errorf("Expected bumped=false for non-releasable commits on empty tag")
+		}
+	})
+
+	t.Run("first release on 0.0.0 tag", func(t *testing.T) {
+		major, minor, patch, bumped := CalculateNextVersion("v0.0.0", []string{"feat: init"})
+		if !bumped || major != 1 || minor != 0 || patch != 0 {
+			t.Errorf("Expected 1.0.0 bumped from v0.0.0, got %d.%d.%d, bumped=%v", major, minor, patch, bumped)
+		}
+	})
+
+	t.Run("bumps on existing v1.0.0", func(t *testing.T) {
+		major, minor, patch, bumped := CalculateNextVersion("v1.0.0", []string{"fix: correct bug"})
+		if !bumped || major != 1 || minor != 0 || patch != 1 {
+			t.Errorf("Expected 1.0.1, got %d.%d.%d, bumped=%v", major, minor, patch, bumped)
+		}
+
+		for _, typ := range []string{"perf", "refactor", "ci", "build"} {
+			m, mi, p, b := CalculateNextVersion("v1.0.0", []string{typ + ": update something"})
+			if !b || m != 1 || mi != 0 || p != 1 {
+				t.Errorf("Expected 1.0.1 for %s, got %d.%d.%d, bumped=%v", typ, m, mi, p, b)
+			}
+		}
+
+		major, minor, patch, bumped = CalculateNextVersion("v1.0.0", []string{"feat: new feature", "fix: also a fix"})
+		if !bumped || major != 1 || minor != 1 || patch != 0 {
+			t.Errorf("Expected 1.1.0, got %d.%d.%d, bumped=%v", major, minor, patch, bumped)
+		}
+
+		major, minor, patch, bumped = CalculateNextVersion("v1.0.0", []string{"feat!: break things", "feat: normal"})
+		if !bumped || major != 2 || minor != 0 || patch != 0 {
+			t.Errorf("Expected 2.0.0, got %d.%d.%d, bumped=%v", major, minor, patch, bumped)
+		}
+
+		major, minor, patch, bumped = CalculateNextVersion("v1.0.0", []string{"fix: change api\n\nBREAKING CHANGE: new api"})
+		if !bumped || major != 2 || minor != 0 || patch != 0 {
+			t.Errorf("Expected 2.0.0, got %d.%d.%d, bumped=%v", major, minor, patch, bumped)
+		}
+
+		major, minor, patch, bumped = CalculateNextVersion("v1.0.0", []string{"chore(release): release v1.0.0", "docs: readme"})
+		if bumped {
+			t.Errorf("Expected bumped=false when only chore(release) and docs exist, got %d.%d.%d", major, minor, patch)
+		}
+	})
+
+	t.Run("pre-1.0 tag progression", func(t *testing.T) {
+		major, minor, patch, bumped := CalculateNextVersion("v0.1.0", []string{"feat: add widget"})
+		if !bumped || major != 0 || minor != 2 || patch != 0 {
+			t.Errorf("Expected 0.2.0, got %d.%d.%d, bumped=%v", major, minor, patch, bumped)
+		}
+
+		major, minor, patch, bumped = CalculateNextVersion("v0.1.0", []string{"fix: fix widget"})
+		if !bumped || major != 0 || minor != 1 || patch != 1 {
+			t.Errorf("Expected 0.1.1, got %d.%d.%d, bumped=%v", major, minor, patch, bumped)
+		}
+
+		major, minor, patch, bumped = CalculateNextVersion("v0.1.0", []string{"feat!: rewrite everything"})
+		if !bumped || major != 1 || minor != 0 || patch != 0 {
+			t.Errorf("Expected 1.0.0, got %d.%d.%d, bumped=%v", major, minor, patch, bumped)
+		}
+	})
+}
+
+func TestFormatChangelogSection(t *testing.T) {
+	commits := []string{
+		"1111111|feat(auth)!: replace token format",
+		"2222222|feat(nav): add goal pose callback",
+		"3333333|fix: prevent null pointer exception",
+		"4444444|perf(db): cache query results",
+		"5555555|refactor(core): simplify handler dispatch",
+		"6666666|ci: add release-stage step",
+		"7777777|chore: update linter rules",
+		"8888888|chore(release): release v1.0.0",
+		"just a simple fix without sha",
+	}
+
+	section := FormatChangelogSection("1.1.0", "2026-11-04", commits)
+
+	if !strings.HasPrefix(section, "## 1.1.0 (2026-11-04)\n\n") {
+		t.Errorf("Missing expected header in section: %s", section)
+	}
+	if !strings.Contains(section, "### Breaking Changes\n\n* **auth:** replace token format (1111111)") {
+		t.Errorf("Missing breaking change in section: %s", section)
+	}
+	if !strings.Contains(section, "### Features\n\n* **nav:** add goal pose callback (2222222)") {
+		t.Errorf("Missing features in section: %s", section)
+	}
+	if !strings.Contains(section, "### Bug Fixes\n\n* prevent null pointer exception (3333333)") {
+		t.Errorf("Missing bug fixes in section: %s", section)
+	}
+	if !strings.Contains(section, "### Performance & Refactoring\n\n* **db:** cache query results (4444444)\n* **core:** simplify handler dispatch (5555555)") {
+		t.Errorf("Missing perf/refactor in section: %s", section)
+	}
+	if !strings.Contains(section, "### Maintenance & CI\n\n* add release-stage step (6666666)\n* update linter rules (7777777)\n* just a simple fix without sha") {
+		t.Errorf("Missing maintenance & ci in section: %s", section)
+	}
+	if strings.Contains(section, "chore(release): release v1.0.0") {
+		t.Errorf("Section should not contain chore(release) commit: %s", section)
+	}
+}
+
+func TestUpdateChangelogContent(t *testing.T) {
+	newSec := "## 1.1.0 (2026-11-04)\n\n### Features\n\n* **nav:** add goal (1234567)\n"
+
+	t.Run("empty changelog", func(t *testing.T) {
+		res := UpdateChangelogContent("", "1.1.0", newSec)
+		expected := "# Changelog\n\n## 1.1.0 (2026-11-04)\n\n### Features\n\n* **nav:** add goal (1234567)\n"
+		if res != expected {
+			t.Errorf("Expected %q, got %q", expected, res)
+		}
+	})
+
+	t.Run("prepend under existing changelog", func(t *testing.T) {
+		existing := "# Changelog\n\n## 1.0.0 (2026-11-01)\n\n### Features\n\n* init\n"
+		res := UpdateChangelogContent(existing, "1.1.0", newSec)
+		if !strings.HasPrefix(res, "# Changelog\n\n## 1.1.0 (2026-11-04)") {
+			t.Errorf("Expected 1.1.0 prepended, got: %s", res)
+		}
+		if !strings.Contains(res, "## 1.0.0 (2026-11-01)") {
+			t.Errorf("Expected 1.0.0 preserved, got: %s", res)
+		}
+	})
+
+	t.Run("idempotent replacement of existing section", func(t *testing.T) {
+		existing := "# Changelog\n\n## 1.1.0 (2026-11-03)\n\n### Old Features\n\n* old (0000000)\n\n## 1.0.0 (2026-11-01)\n\n### Features\n\n* init\n"
+		res := UpdateChangelogContent(existing, "1.1.0", newSec)
+		if strings.Contains(res, "Old Features") {
+			t.Errorf("Expected old 1.1.0 section replaced, got: %s", res)
+		}
+		if !strings.Contains(res, "## 1.1.0 (2026-11-04)") {
+			t.Errorf("Expected new 1.1.0 section present, got: %s", res)
+		}
+		if !strings.Contains(res, "## 1.0.0 (2026-11-01)") {
+			t.Errorf("Expected 1.0.0 section preserved, got: %s", res)
+		}
+	})
+}
+
+func TestExecuteRelease(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	t.Run("Mode A: Release Promotion", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		outFile := filepath.Join(tmpDir, "github_output")
+		changelogPath := filepath.Join(tmpDir, "CHANGELOG.md")
+		_ = os.WriteFile(changelogPath, []byte("# Changelog\n\n## 1.1.0 (2026-11-04)\n\n### Features\n\n* new feature (abc1234)\n"), 0644)
+
+		var executedCmds [][]string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			executedCmds = append(executedCmds, args)
+			if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "rev-parse" {
+				return tmpDir + "\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" {
+				return "chore(release): release v1.1.0\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "rev-parse" {
+				// tag does not exist yet
+				return "", "", 1, nil
+			}
+			if len(args) >= 2 && args[0] == "gh" && args[1] == "release" && args[2] == "view" {
+				// release does not exist yet
+				return "", "", 1, nil
+			}
+			return "", "", 0, nil
+		}
+
+		opts := ReleaseOptions{
+			Path:       tmpDir,
+			OutputFile: outFile,
+			DryRun:     false,
+		}
+
+		res, err := ExecuteRelease(opts)
+		if err != nil {
+			t.Fatalf("ExecuteRelease failed: %v", err)
+		}
+		if !res.ReleasesCreated {
+			t.Fatalf("Expected ReleasesCreated=true in Mode A")
+		}
+		if res.TagName != "v1.1.0" || res.Version != "1.1.0" {
+			t.Errorf("Expected v1.1.0, got %s / %s", res.TagName, res.Version)
+		}
+		if res.Major != 1 || res.Minor != 1 || res.Patch != 0 {
+			t.Errorf("Expected 1.1.0, got %d.%d.%d", res.Major, res.Minor, res.Patch)
+		}
+		if !strings.Contains(res.ChangelogEntry, "new feature (abc1234)") {
+			t.Errorf("Expected changelog notes, got %s", res.ChangelogEntry)
+		}
+
+		outData, err := os.ReadFile(outFile)
+		if err != nil {
+			t.Fatalf("Failed to read output file: %v", err)
+		}
+		outStr := string(outData)
+		if !strings.Contains(outStr, "releases_created=true") || !strings.Contains(outStr, "version=1.1.0") {
+			t.Errorf("Unexpected GITHUB_OUTPUT content: %s", outStr)
+		}
+
+		// Verify git tag & push, and gh release create were called
+		foundTag := false
+		foundGhRelease := false
+		for _, cmd := range executedCmds {
+			if len(cmd) >= 3 && cmd[0] == "git" && cmd[1] == "tag" && cmd[2] == "-a" {
+				foundTag = true
+			}
+			if len(cmd) >= 3 && cmd[0] == "gh" && cmd[1] == "release" && cmd[2] == "create" {
+				foundGhRelease = true
+			}
+		}
+		if !foundTag {
+			t.Errorf("Expected git tag -a to be executed")
+		}
+		if !foundGhRelease {
+			t.Errorf("Expected gh release create to be executed")
+		}
+	})
+
+	t.Run("Mode B: Release Staging - New PR", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		outFile := filepath.Join(tmpDir, "github_output")
+
+		var executedCmds [][]string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			executedCmds = append(executedCmds, args)
+			if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "rev-parse" {
+				return tmpDir + "\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" && args[2] == "-1" {
+				return "feat(ui): add dashboard\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "tag" && args[2] == "--list" {
+				return "v1.0.0\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" && strings.Contains(args[2], "..HEAD") {
+				return "1234567|feat(ui): add dashboard\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "list" {
+				return "null\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		}
+
+		opts := ReleaseOptions{
+			Path:          tmpDir,
+			TargetBranch:  "main",
+			StagingBranch: "release-staging",
+			OutputFile:    outFile,
+			DryRun:        false,
+		}
+
+		res, err := ExecuteRelease(opts)
+		if err != nil {
+			t.Fatalf("ExecuteRelease failed: %v", err)
+		}
+		if res.ReleasesCreated {
+			t.Errorf("Expected ReleasesCreated=false in Mode B staging")
+		}
+		if res.TagName != "v1.1.0" || res.Version != "1.1.0" {
+			t.Errorf("Expected v1.1.0, got %s / %s", res.TagName, res.Version)
+		}
+
+		outData, _ := os.ReadFile(outFile)
+		if !strings.Contains(string(outData), "releases_created=false") || !strings.Contains(string(outData), "version=1.1.0") {
+			t.Errorf("Unexpected GITHUB_OUTPUT content: %s", string(outData))
+		}
+
+		foundPrCreate := false
+		foundCheckoutStaging := false
+		foundCheckoutMain := false
+		for _, cmd := range executedCmds {
+			if len(cmd) >= 4 && cmd[0] == "gh" && cmd[1] == "pr" && cmd[2] == "create" {
+				foundPrCreate = true
+			}
+			if len(cmd) >= 4 && cmd[0] == "git" && cmd[1] == "checkout" && cmd[2] == "-B" && cmd[3] == "release-staging" {
+				foundCheckoutStaging = true
+			}
+			if len(cmd) >= 3 && cmd[0] == "git" && cmd[1] == "checkout" && cmd[2] == "main" {
+				foundCheckoutMain = true
+			}
+		}
+		if !foundCheckoutStaging {
+			t.Errorf("Expected git checkout -B release-staging")
+		}
+		if !foundPrCreate {
+			t.Errorf("Expected gh pr create")
+		}
+		if !foundCheckoutMain {
+			t.Errorf("Expected git checkout main back to target branch")
+		}
+	})
+
+	t.Run("Mode B: Release Staging - Update Existing PR", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		var executedCmds [][]string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			executedCmds = append(executedCmds, args)
+			if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "rev-parse" {
+				return tmpDir + "\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" && args[2] == "-1" {
+				return "fix: resolve memory leak\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "tag" && args[2] == "--list" {
+				return "v1.1.0\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" && strings.Contains(args[2], "..HEAD") {
+				return "abcdef1|fix: resolve memory leak\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "list" {
+				return "55\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		}
+
+		opts := ReleaseOptions{
+			Path:   tmpDir,
+			DryRun: false,
+		}
+
+		res, err := ExecuteRelease(opts)
+		if err != nil {
+			t.Fatalf("ExecuteRelease failed: %v", err)
+		}
+		if res.TagName != "v1.1.1" {
+			t.Errorf("Expected v1.1.1, got %s", res.TagName)
+		}
+
+		foundPrEdit := false
+		for _, cmd := range executedCmds {
+			if len(cmd) >= 4 && cmd[0] == "gh" && cmd[1] == "pr" && cmd[2] == "edit" && cmd[3] == "55" {
+				foundPrEdit = true
+			}
+		}
+		if !foundPrEdit {
+			t.Errorf("Expected gh pr edit 55")
+		}
+	})
+
+	t.Run("Mode B: No Releasable Commits", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		outFile := filepath.Join(tmpDir, "github_output")
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "rev-parse" {
+				return tmpDir + "\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" && args[2] == "-1" {
+				return "docs: update guide\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "tag" && args[2] == "--list" {
+				return "v1.0.0\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" && strings.Contains(args[2], "..HEAD") {
+				return "1234567|docs: update guide\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		}
+
+		opts := ReleaseOptions{
+			Path:       tmpDir,
+			OutputFile: outFile,
+		}
+
+		res, err := ExecuteRelease(opts)
+		if err != nil {
+			t.Fatalf("ExecuteRelease failed: %v", err)
+		}
+		if res.ReleasesCreated || res.Version != "" {
+			t.Errorf("Expected no release, got %+v", res)
+		}
+
+		outData, _ := os.ReadFile(outFile)
+		if !strings.Contains(string(outData), "releases_created=false") {
+			t.Errorf("Expected releases_created=false in output file, got: %s", string(outData))
+		}
+	})
+
+	t.Run("Dry Run Mode", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		var executedCmds [][]string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			executedCmds = append(executedCmds, args)
+			if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "rev-parse" {
+				return tmpDir + "\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" && args[2] == "-1" {
+				return "feat: dry run feature\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "tag" && args[2] == "--list" {
+				return "v1.0.0\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" && strings.Contains(args[2], "..HEAD") {
+				return "1111111|feat: dry run feature\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		}
+
+		opts := ReleaseOptions{
+			Path:   tmpDir,
+			DryRun: true,
+		}
+
+		res, err := ExecuteRelease(opts)
+		if err != nil {
+			t.Fatalf("ExecuteRelease failed: %v", err)
+		}
+		if res.TagName != "v1.1.0" {
+			t.Errorf("Expected v1.1.0, got %s", res.TagName)
+		}
+
+		for _, cmd := range executedCmds {
+			if len(cmd) >= 2 && cmd[0] == "git" && (cmd[1] == "checkout" || cmd[1] == "commit" || cmd[1] == "push") {
+				t.Errorf("Mutating git command executed in dry run: %v", cmd)
+			}
+			if len(cmd) >= 2 && cmd[0] == "gh" {
+				t.Errorf("gh command executed in dry run: %v", cmd)
+			}
+		}
+	})
+}

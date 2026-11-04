@@ -33,6 +33,9 @@ Commands:
   hook install [path] [--all]
       Install Conventional Commits (commit-msg) and pre-commit audit hooks.
 
+  release [path] [--dry-run] [--target-branch <main>] [--staging-branch <release-staging>]
+      Stage a release PR (on release-staging) or promote/tag a release if HEAD is a release commit.
+
   version, -v, --version
       Print repokit version.
 
@@ -247,6 +250,60 @@ func run(args []string) int {
 				return 1
 			}
 			repokit.LogInfo("Tip: Run 'repokit hook install --all' to also install the pre-commit audit hook.")
+		}
+		return 0
+
+	case "release":
+		var path string
+		var dryRun bool
+		targetBranch := "main"
+		stagingBranch := repokit.DefaultStagingBranch
+
+		for i := 0; i < len(cmdArgs); i++ {
+			arg := cmdArgs[i]
+			switch arg {
+			case "--dry-run":
+				dryRun = true
+			case "--target-branch":
+				if i+1 < len(cmdArgs) {
+					i++
+					targetBranch = cmdArgs[i]
+				}
+			case "--staging-branch":
+				if i+1 < len(cmdArgs) {
+					i++
+					stagingBranch = cmdArgs[i]
+				}
+			default:
+				if strings.HasPrefix(arg, "--target-branch=") {
+					targetBranch = strings.TrimPrefix(arg, "--target-branch=")
+				} else if strings.HasPrefix(arg, "--staging-branch=") {
+					stagingBranch = strings.TrimPrefix(arg, "--staging-branch=")
+				} else if !strings.HasPrefix(arg, "-") && path == "" {
+					path = arg
+				}
+			}
+		}
+
+		opts := repokit.ReleaseOptions{
+			Path:          path,
+			TargetBranch:  targetBranch,
+			StagingBranch: stagingBranch,
+			DryRun:        dryRun,
+		}
+
+		res, err := repokit.ExecuteRelease(opts)
+		if err != nil {
+			repokit.LogError("Release failed: %v", err)
+			return 1
+		}
+
+		if res.ReleasesCreated {
+			repokit.LogSuccess("Released %s successfully!", res.TagName)
+		} else if res.Version != "" {
+			repokit.LogSuccess("Release staged for %s (branch: %s)", res.TagName, stagingBranch)
+		} else {
+			repokit.LogInfo("No release needed.")
 		}
 		return 0
 

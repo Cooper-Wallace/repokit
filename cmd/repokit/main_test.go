@@ -3,6 +3,7 @@ package main
 import (
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Cooper-Wallace/repokit"
@@ -158,5 +159,64 @@ func TestConfigureDiscoveryCLI(t *testing.T) {
 
 	if code := run([]string{"configure", "--repos=r1,r2", "--path=" + tmpDir, "-f", "--pr", "--dry-run"}); code != 0 {
 		t.Errorf("Expected 0 for configure with inline flags, got %d", code)
+	}
+}
+
+func TestReleaseCLI(t *testing.T) {
+	oldRunner := repokit.CommandRunner
+	defer func() { repokit.CommandRunner = oldRunner }()
+
+	tmpDir := t.TempDir()
+
+	repokit.CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+		if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "rev-parse" {
+			return tmpDir + "\n", "", 0, nil
+		}
+		if len(args) >= 3 && args[0] == "git" && args[1] == "log" && args[2] == "-1" {
+			return "feat: cli test\n", "", 0, nil
+		}
+		if len(args) >= 3 && args[0] == "git" && args[1] == "tag" && args[2] == "--list" {
+			return "v1.0.0\n", "", 0, nil
+		}
+		if len(args) >= 3 && args[0] == "git" && args[1] == "log" && strings.Contains(args[2], "..HEAD") {
+			return "1111111|feat: cli test\n", "", 0, nil
+		}
+		return "", "", 0, nil
+	}
+
+	// Release with dry-run and explicit path
+	if code := run([]string{"release", tmpDir, "--dry-run"}); code != 0 {
+		t.Errorf("Expected 0 for release %s --dry-run, got %d", tmpDir, code)
+	}
+
+	// Release with target-branch and staging-branch flags
+	if code := run([]string{"release", tmpDir, "--dry-run", "--target-branch", "main", "--staging-branch", "custom-staging"}); code != 0 {
+		t.Errorf("Expected 0 for release with branches, got %d", code)
+	}
+
+	// Release with inline branch flags
+	if code := run([]string{"release", tmpDir, "--dry-run", "--target-branch=main", "--staging-branch=custom-staging"}); code != 0 {
+		t.Errorf("Expected 0 for release with inline branches, got %d", code)
+	}
+
+	// Release Mode A promotion
+	repokit.CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+		if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "rev-parse" {
+			return tmpDir + "\n", "", 0, nil
+		}
+		if len(args) >= 3 && args[0] == "git" && args[1] == "log" && args[2] == "-1" {
+			return "chore(release): release v1.0.1\n", "", 0, nil
+		}
+		return "", "", 0, nil
+	}
+	if code := run([]string{"release", tmpDir, "--dry-run"}); code != 0 {
+		t.Errorf("Expected 0 for release Mode A promotion, got %d", code)
+	}
+
+	// Release not in git repo
+	nonGit := filepath.Join(tmpDir, "not-a-repo")
+	repokit.CommandRunner = oldRunner
+	if code := run([]string{"release", nonGit}); code != 1 {
+		t.Errorf("Expected 1 for release on non-git directory, got %d", code)
 	}
 }
