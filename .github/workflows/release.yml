@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,7 +17,6 @@ jobs:
     with:
       staging-branch: "release-staging"
       target-branch: "main"
-      token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GH_PAT || github.token }}
     secrets: inherit
 
   package-release:
