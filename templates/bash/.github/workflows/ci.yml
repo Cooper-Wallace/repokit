@@ -13,7 +13,7 @@ permissions:
 jobs:
   validate-pr:
     if: github.event_name == 'pull_request'
-    uses: {{governance_slug}}/.github/workflows/semantic-pr.yml@main
+    uses: {{governance_slug}}/.github/workflows/semantic-pr.yml@v1
 
   ci:
-    uses: {{governance_slug}}/.github/workflows/reusable-bash.yml@main
+    uses: {{governance_slug}}/.github/workflows/reusable-bash.yml@v1

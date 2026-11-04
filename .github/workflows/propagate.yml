@@ -1,12 +1,8 @@
 name: "Central Governance Propagation"
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'templates/**'
-      - '.github/workflows/reusable-*'
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       target_repos:
@@ -19,8 +15,8 @@ on:
         required: false
         type: boolean
         default: false
-      create_pr:
-        description: "Automatically create Pull Requests on downstream repositories"
+      direct_commit:
+        description: "Commit directly to main without creating PR"
         required: false
         type: boolean
         default: true
@@ -54,8 +50,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ -z "$GH_PAT" ]; then
-            echo "No GH_PAT secret configured; skipping automated push propagation to prevent cross-repo auth failures. Use workflow_dispatch with a PAT."
+          if [ "$GITHUB_EVENT_NAME" = "release" ] && [ -z "$GH_PAT" ]; then
+            echo "No GH_PAT secret configured; skipping automated release propagation to prevent cross-repo auth failures. Configure GH_PAT in repository secrets or trigger manually via workflow_dispatch."
             exit 0
           fi
 
@@ -73,16 +69,17 @@ jobs:
             ARGS="--repos $TARGETS"
           fi
 
-          if [ "${{ inputs.dry_run }}" = "true" ] || [ "${{ github.event_name }}" = "push" ]; then
-            if [ -z "${{ secrets.GH_PAT }}" ] && [ "${{ github.event_name }}" = "push" ]; then
-              echo "No GH_PAT secret provided for push event propagation; running in dry-run mode."
-              ARGS="$ARGS --dry-run"
-            elif [ "${{ inputs.dry_run }}" = "true" ]; then
-              ARGS="$ARGS --dry-run"
-            fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
           fi
 
-          if [ "${{ inputs.create_pr }}" = "true" ] && [ "${{ inputs.dry_run }}" != "true" ]; then
+          if [ "${{ inputs.direct_commit }}" = "true" ] || ([ "$GITHUB_EVENT_NAME" = "release" ] && [ "${{ inputs.dry_run }}" != "true" ]); then
+            ARGS="$ARGS --direct --force"
+            RELEASE_TAG="${{ github.event.release.tag_name }}"
+            if [ -n "$RELEASE_TAG" ]; then
+              ARGS="$ARGS --release-ref $RELEASE_TAG"
+            fi
+          elif [ "${{ inputs.direct_commit }}" = "false" ]; then
             ARGS="$ARGS --pr"
           fi
 

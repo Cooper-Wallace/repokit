@@ -187,7 +187,7 @@ permissions:
 jobs:
   release-stage:
     name: "Semantic Release Gate"
-    uses: {{governance_slug}}/.github/workflows/reusable-release-prep.yml@main
+    uses: {{governance_slug}}/.github/workflows/reusable-release-prep.yml@v1
     with:
       release-type: "simple"
 `
@@ -684,6 +684,13 @@ func ApplyBranchRuleset(repoSlug string, defaultBranch string, requiredChecks []
 		"name":        "default-branch-protection",
 		"target":      "branch",
 		"enforcement": "active",
+		"bypass_actors": []map[string]interface{}{
+			{
+				"actor_id":    5,
+				"actor_type":  "RepositoryRole",
+				"bypass_mode": "always",
+			},
+		},
 		"conditions": map[string]interface{}{
 			"ref_name": map[string]interface{}{
 				"include": []string{defaultBranch},
@@ -1454,14 +1461,16 @@ func PrintTemplates() {
 
 // Configuration & Multi-Repository Discovery Engine
 type ConfigureOptions struct {
-	All       bool
-	Repos     []string
-	Local     bool
-	LocalDir  string
-	TargetDir string
-	Force     bool
-	DryRun    bool
-	CreatePR  bool
+	All          bool
+	Repos        []string
+	Local        bool
+	LocalDir     string
+	TargetDir    string
+	Force        bool
+	DryRun       bool
+	CreatePR     bool
+	DirectCommit bool   // commit and push directly to main branch
+	ReleaseRef   string // release reference tag (e.g. "v1.1.0"), defaults to "latest" if empty
 }
 
 // PropagateOptions is an alias for ConfigureOptions for backward compatibility.
@@ -1517,7 +1526,9 @@ func configureSingleRepository(opts ConfigureOptions) error {
 		LogInfo("[DRY RUN] Would apply workflow permissions to %s", slug)
 		LogInfo("[DRY RUN] Would apply branch protection ruleset to %s", slug)
 		LogInfo("[DRY RUN] Would configure local repository at %s (force=%v)", repoRoot, opts.Force)
-		if opts.CreatePR {
+		if opts.DirectCommit {
+			LogInfo("[DRY RUN] Would check git status and commit directly to main at %s if changes exist", repoRoot)
+		} else if opts.CreatePR {
 			LogInfo("[DRY RUN] Would check git status and create PR on chore/repokit-sync at %s if changes exist", repoRoot)
 		}
 		return nil
@@ -1533,7 +1544,28 @@ func configureSingleRepository(opts ConfigureOptions) error {
 	_, _ = ScaffoldArchetypeCI(repoRoot, opts.Force)
 	_, _ = ScaffoldReleaseWorkflow(repoRoot, opts.Force)
 
-	if opts.CreatePR {
+	if opts.DirectCommit {
+		statusOut, _, _, _ := RunCmd([]string{"git", "-C", repoRoot, "status", "--porcelain"}, "")
+		if strings.TrimSpace(statusOut) != "" {
+			LogInfo("Applying direct governance commit to main for %s...", slug)
+			RunCmd([]string{"git", "-C", repoRoot, "checkout", "main"}, "")
+			RunCmd([]string{"git", "-C", repoRoot, "add", "-A"}, "")
+			refStr := opts.ReleaseRef
+			if refStr == "" {
+				refStr = "latest"
+			}
+			commitMsg := fmt.Sprintf("chore(repokit): sync governance standards and workflows to %s", refStr)
+			RunCmd([]string{"git", "-C", repoRoot, "commit", "-m", commitMsg}, "")
+			_, pushErr, pushCode, _ := RunCmd([]string{"git", "-C", repoRoot, "push", "origin", "main"}, "")
+			if pushCode == 0 {
+				LogSuccess("Directly committed governance standards to main on %s", slug)
+			} else {
+				LogWarn("Failed to push direct commit to %s: %s", slug, strings.TrimSpace(pushErr))
+			}
+		} else {
+			LogInfo("No local modifications detected in %s; skipping direct commit.", repoRoot)
+		}
+	} else if opts.CreatePR {
 		statusOut, _, _, _ := RunCmd([]string{"git", "-C", repoRoot, "status", "--porcelain"}, "")
 		if strings.TrimSpace(statusOut) != "" {
 			LogInfo("Detected modified files in %s, creating PR...", repoRoot)
@@ -1695,9 +1727,10 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 
 		// Determine local repository path if exists
 		localPath := slugToLocalPath[slug]
+		parts := strings.Split(slug, "/")
+		repoName := parts[len(parts)-1]
+
 		if localPath == "" {
-			parts := strings.Split(slug, "/")
-			repoName := parts[len(parts)-1]
 			candidate := filepath.Join(localBaseDir, repoName)
 			if isDir(filepath.Join(candidate, ".git")) {
 				localPath = candidate
@@ -1710,7 +1743,9 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 			LogInfo("[DRY RUN] Would apply branch protection ruleset to %s", slug)
 			if localPath != "" {
 				LogInfo("[DRY RUN] Would configure local repository at %s (force=%v)", localPath, opts.Force)
-				if opts.CreatePR {
+				if opts.DirectCommit {
+					LogInfo("[DRY RUN] Would check git status and commit directly to main at %s if changes exist", localPath)
+				} else if opts.CreatePR {
 					LogInfo("[DRY RUN] Would check git status and create PR on chore/repokit-sync at %s if changes exist", localPath)
 				}
 			}
@@ -1728,15 +1763,45 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 			LogWarn("Failed to apply branch ruleset for %s: %v", slug, err)
 		}
 
-		// 2. Local repository configuration & PR creation
+		// Ephemeral clone for remote repos discovered without existing local clone
+		if localPath == "" {
+			tempDir := filepath.Join(os.TempDir(), "repokit-sync", repoName)
+			_ = os.RemoveAll(tempDir)
+			_ = os.MkdirAll(filepath.Dir(tempDir), 0755)
+			defer os.RemoveAll(tempDir)
+			_, cloneErr, cloneCode, _ := RunCmd([]string{"gh", "repo", "clone", slug, tempDir, "--", "--depth", "1"}, "")
+			if cloneCode == 0 {
+				localPath = tempDir
+			} else {
+				LogWarn("Failed to clone %s ephemerally: %s", slug, strings.TrimSpace(cloneErr))
+			}
+		}
+
+		// 2. Local repository configuration & PR creation / direct commit
 		if localPath != "" {
 			if err := ConfigureRepository(localPath, opts.Force); err != nil {
 				LogWarn("Failed to configure local repository at %s: %v", localPath, err)
 			}
 
-			if opts.CreatePR {
-				statusOut, _, _, _ := RunCmd([]string{"git", "-C", localPath, "status", "--porcelain"}, "")
-				if strings.TrimSpace(statusOut) != "" {
+			statusOut, _, _, _ := RunCmd([]string{"git", "-C", localPath, "status", "--porcelain"}, "")
+			if strings.TrimSpace(statusOut) != "" {
+				if opts.DirectCommit {
+					LogInfo("Applying direct governance commit to main for %s...", slug)
+					RunCmd([]string{"git", "-C", localPath, "checkout", "main"}, "")
+					RunCmd([]string{"git", "-C", localPath, "add", "-A"}, "")
+					refStr := opts.ReleaseRef
+					if refStr == "" {
+						refStr = "latest"
+					}
+					commitMsg := fmt.Sprintf("chore(repokit): sync governance standards and workflows to %s", refStr)
+					RunCmd([]string{"git", "-C", localPath, "commit", "-m", commitMsg}, "")
+					_, pushErr, pushCode, _ := RunCmd([]string{"git", "-C", localPath, "push", "origin", "main"}, "")
+					if pushCode == 0 {
+						LogSuccess("Directly committed governance standards to main on %s", slug)
+					} else {
+						LogWarn("Failed to push direct commit to %s: %s", slug, strings.TrimSpace(pushErr))
+					}
+				} else if opts.CreatePR {
 					LogInfo("Detected modified files in %s, creating PR...", localPath)
 					_, stderr, code, _ := RunCmd([]string{"git", "-C", localPath, "checkout", "-B", "chore/repokit-sync"}, "")
 					if code != 0 {
@@ -1769,7 +1834,11 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 					} else {
 						LogWarn("gh pr create for %s: %s", slug, strings.TrimSpace(prErr))
 					}
-				} else {
+				}
+			} else {
+				if opts.DirectCommit {
+					LogInfo("No local modifications detected in %s; skipping direct commit.", localPath)
+				} else if opts.CreatePR {
 					LogInfo("No local modifications detected in %s; skipping PR creation.", localPath)
 				}
 			}
@@ -2171,6 +2240,9 @@ func ExecuteRelease(opts ReleaseOptions) (*ReleaseResult, error) {
 				if _, _, code, err := RunCmd([]string{"git", "push", "origin", tagName}, repoRoot); err != nil || code != 0 {
 					return nil, fmt.Errorf("failed to push git tag %s: %w", tagName, err)
 				}
+				majorTag := fmt.Sprintf("v%d", major)
+				RunCmd([]string{"git", "tag", "-f", "-a", majorTag, "-m", "Release " + majorTag}, repoRoot)
+				RunCmd([]string{"git", "push", "--force", "origin", majorTag}, repoRoot)
 			}
 
 			_, _, relCode, _ := RunCmd([]string{"gh", "release", "view", tagName}, repoRoot)
@@ -2301,6 +2373,7 @@ func ExecuteRelease(opts ReleaseOptions) (*ReleaseResult, error) {
 		}
 
 		RunCmd([]string{"gh", "workflow", "run", "semantic-pr.yml", "--ref", opts.StagingBranch}, repoRoot)
+		RunCmd([]string{"gh", "workflow", "run", "test.yml", "--ref", opts.StagingBranch}, repoRoot)
 		RunCmd([]string{"git", "checkout", opts.TargetBranch}, repoRoot)
 	}
 

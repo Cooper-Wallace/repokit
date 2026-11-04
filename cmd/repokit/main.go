@@ -21,7 +21,7 @@ Commands:
   create <name> [-d/--description] [-t/--type <python|java|typescript|bash|go>] [--public] [--path <dir>]
       Create a new standardized GitHub repository with automated DevOps scaffolding.
 
-  configure [path] [-f/--force] [--all] [--repos <r1,r2>] [--dry-run] [--pr]
+  configure [path] [-f/--force] [--all] [--repos <r1,r2>] [--dry-run] [--pr] [--direct] [--release-ref <tag>]
       Apply DevOps standards, branch rulesets, hooks, and CI workflows to an existing repo (or across --all).
 
   audit [path] [-t/--type <python|java|typescript|bash|go>] [--local] [--remote]
@@ -137,6 +137,13 @@ func run(args []string) int {
 				opts.DryRun = true
 			case "--pr":
 				opts.CreatePR = true
+			case "--direct", "--push-main":
+				opts.DirectCommit = true
+			case "--release-ref":
+				if i+1 < len(cmdArgs) {
+					i++
+					opts.ReleaseRef = cmdArgs[i]
+				}
 			case "--local":
 				opts.Local = true
 			case "--repos":
@@ -156,7 +163,9 @@ func run(args []string) int {
 					path = cmdArgs[i]
 				}
 			default:
-				if strings.HasPrefix(arg, "--repos=") {
+				if strings.HasPrefix(arg, "--release-ref=") {
+					opts.ReleaseRef = strings.TrimPrefix(arg, "--release-ref=")
+				} else if strings.HasPrefix(arg, "--repos=") {
 					reposStr := strings.TrimPrefix(arg, "--repos=")
 					for _, r := range strings.Split(reposStr, ",") {
 						r = strings.TrimSpace(r)
