@@ -385,14 +385,14 @@ func GetRepoSlug(repoRoot string) (string, error) {
 }
 
 func GetGitHubUser() (string, error) {
+	stdout, stderr, code, err := RunCmd([]string{"gh", "api", "user", "--jq", ".login"}, "")
+	if code == 0 && strings.TrimSpace(stdout) != "" {
+		return strings.TrimSpace(stdout), nil
+	}
 	if owner := os.Getenv("GITHUB_REPOSITORY_OWNER"); owner != "" {
 		return owner, nil
 	}
-	stdout, stderr, code, err := RunCmd([]string{"gh", "api", "user", "--jq", ".login"}, "")
-	if code != 0 {
-		return "", fmt.Errorf("failed to get authenticated GitHub user: %v: %s", err, stderr)
-	}
-	return strings.TrimSpace(stdout), nil
+	return "", fmt.Errorf("failed to get authenticated GitHub user: %v: %s", err, stderr)
 }
 
 // Archetype Management

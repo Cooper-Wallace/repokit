@@ -1062,8 +1062,11 @@ func TestGetGitHubUser(t *testing.T) {
 	oldRunner := CommandRunner
 	defer func() { CommandRunner = oldRunner }()
 
-	t.Run("env_owner_override", func(t *testing.T) {
+	t.Run("env_owner_fallback", func(t *testing.T) {
 		t.Setenv("GITHUB_REPOSITORY_OWNER", "ci-owner")
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			return "", "not logged in", 1, fmt.Errorf("exit status 1")
+		}
 		user, err := GetGitHubUser()
 		if err != nil || user != "ci-owner" {
 			t.Errorf("Expected user ci-owner from GITHUB_REPOSITORY_OWNER, got %s, err=%v", user, err)
@@ -1185,6 +1188,7 @@ func TestCreateRepository(t *testing.T) {
 	defer func() { CommandRunner = oldRunner }()
 
 	t.Run("not_authenticated", func(t *testing.T) {
+		t.Setenv("GITHUB_REPOSITORY_OWNER", "")
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			if len(args) > 1 && args[1] == "api" {
 				return "", "auth error", 1, fmt.Errorf("auth error")
