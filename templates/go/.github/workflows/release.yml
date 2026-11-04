@@ -12,7 +12,7 @@ permissions:
 jobs:
   release-stage:
     name: "Semantic Release Gate"
-    uses: {{governance_slug}}/.github/workflows/reusable-release-prep.yml@main
+    uses: {{governance_slug}}/.github/workflows/reusable-release-prep.yml@v1
     with:
       staging-branch: "release-staging"
       target-branch: "main"
@@ -21,7 +21,7 @@ jobs:
     name: "Package & Upload Assets"
     needs: release-stage
     if: ${{ needs.release-stage.outputs.releases_created == 'true' }}
-    uses: {{governance_slug}}/.github/workflows/reusable-release-go.yml@main
+    uses: {{governance_slug}}/.github/workflows/reusable-release-go.yml@v1
     with:
       tag-name: ${{ needs.release-stage.outputs.tag_name }}
       go-version: "1.23"

@@ -145,8 +145,24 @@ repokit configure --repos repo1,repo2
 # Dry-run mode (audit changes without applying):
 repokit configure --dry-run
 
+# Direct commit mode (ephemeral clone and direct commit to main without creating PR):
+repokit configure --all --direct --force
+
+# Direct commit associated with a governance release ref:
+repokit configure --all --direct --force --release-ref v1.2.0
+
 # Automatically open Pull Requests on target repositories for any updates:
 repokit configure --all --pr
+```
+
+Options:
+- `-f`, `--force`: Overwrite existing workflows, PR templates, and configuration files.
+- `--all`: Discover and configure all repositories owned by the authenticated GitHub user.
+- `--repos <r1,r2>`: Configure a specific comma-separated list of repositories.
+- `--dry-run`: Inspect actions and changes that would be applied without modifying remote settings or local files.
+- `--direct`, `--push-main`: Commit changes directly to `main` via ephemeral clones and bypass ruleset push restrictions (using administrative tokens), avoiding PR merge fatigue across downstream repositories.
+- `--release-ref <tag>`: Associate direct governance commits with a specific release tag (e.g. `v1.2.0`) in the commit message (`chore(repokit): sync governance standards and workflows to <tag>`).
+- `--pr`: Create a pull request on branch `chore/repokit-sync` instead of pushing directly to `main`.
 ```
 
 ---
@@ -239,6 +255,9 @@ repokit configure --repos repo1,repo2
 # Dry-run mode (audit changes without applying)
 repokit configure --all --dry-run
 
+# Direct commit and push to main across all repositories without manual PR fatigue
+repokit configure --all --direct --force --release-ref v1.2.0
+
 # Automatically open Pull Requests on downstream repositories for any updates
 repokit configure --all --pr
 ```
@@ -248,9 +267,16 @@ To allow GitHub Actions workflows in downstream repositories to automatically sy
 - **Workflow permissions**: "Read and write permissions" (enables `contents: write` and `pull-requests: write`).
 - **Pull Request Approvals**: Enable **"Allow GitHub Actions to create and approve pull requests"** (`can_approve_pull_request_reviews: true`) in repository Actions settings so automated sync PRs can be validated and reviewed smoothly.
 
-### 3. Propagation Patterns
-- **Central Push Trigger (`.github/workflows/propagate.yml`)**: Triggered automatically on pushes to `main` (path filters `templates/**`, `.github/workflows/reusable-*`) or via `workflow_dispatch`. Runs `repokit configure --all` across target repositories.
-- **Downstream Scheduled Sync (`.github/workflows/sync.yml`)**: Scaffolds into all archetype repositories. Runs weekly on Mondays at 04:00 UTC (or via `workflow_dispatch`), calling the centralized reusable workflow `.github/workflows/reusable-sync.yml` in `Cooper-Wallace/repokit` to check for updates and open sync PRs automatically.
+### 3. Release-Driven Direct Propagation Model
+Central governance follows a **Release-Driven Direct Propagation** architecture that eliminates manual PR fatigue across downstream repositories while preserving stability:
+
+- **Release-Driven Direct Propagation (`.github/workflows/propagate.yml`)**:
+  - Central governance changes and reusable workflow enhancements are released and approved via `repokit release`.
+  - Published releases trigger `.github/workflows/propagate.yml`, which executes `repokit configure --all --force --direct --release-ref <vX.Y.Z>`.
+  - Ephemeral cloning and direct commit to `main` updates all consuming repositories without manual PR fatigue.
+  - Reusable workflows pin the stable floating `@v1` tag (`uses: Cooper-Wallace/repokit/.github/workflows/reusable-*@v1`) across all downstream archetype repositories, providing zero-churn stability and immediate non-breaking rollout.
+- **Downstream Scheduled Sync (`.github/workflows/sync.yml`)**:
+  - Scaffolds into all archetype repositories. Runs weekly on Mondays at 04:00 UTC (or via `workflow_dispatch`), calling the centralized reusable workflow `.github/workflows/reusable-sync.yml` in `Cooper-Wallace/repokit` to check for updates and open sync PRs automatically.
 
 ---
 
