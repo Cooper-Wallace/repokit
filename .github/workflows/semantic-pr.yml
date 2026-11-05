@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   main:
-    name: Validate Conventional Commit PR Title
+    name: "Quality Gate / Title Validation"
     if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
@@ -35,4 +35,5 @@ jobs:
             ci
             chore
             revert
+            release
           requireScope: false

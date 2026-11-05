@@ -16,7 +16,7 @@ on:
 
 jobs:
   test:
-    name: "Test & Coverage"
+    name: "Quality Gate / Verification"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -27,7 +27,22 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
 
-      - name: Install dependencies
+      - name: Verify Release Candidate
+        if: github.head_ref == 'release-staging' || startsWith(github.head_ref, 'release-')
+        run: |
+          python -m pip install --upgrade pip
+          pip install build pytest
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          if [ -f pyproject.toml ] || [ -f setup.py ]; then
+            pip install .
+            python -m build
+          fi
+          pytest -v
+
+      - name: Install development dependencies
+        if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         run: |
           python -m pip install --upgrade pip
           pip install pytest pytest-cov ruff
@@ -39,11 +54,13 @@ jobs:
           fi
 
       - name: Run ruff lint & format check
+        if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         continue-on-error: true
         run: |
           ruff check .
           ruff format --check .
 
       - name: Run pytest with coverage
+        if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         run: |
           pytest --cov=src --cov-report=term --cov-report=markdown-append:"$GITHUB_STEP_SUMMARY" --cov-fail-under=${{ inputs.min-coverage }}

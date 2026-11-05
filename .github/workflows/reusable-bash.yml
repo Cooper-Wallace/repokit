@@ -5,7 +5,7 @@ on:
 
 jobs:
   test:
-    name: "Test & Coverage"
+    name: "Quality Gate / Verification"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
