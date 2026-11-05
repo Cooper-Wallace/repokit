@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.0 (2026-11-05)
+
+### Features
+
+* **workflows:** implement bifurcated release CI and unified quality gate (#19) (c6c0053)
+* **release:** pre-certify required status checks on release staging PRs (#18) (efcea42)
+* **propagation:** implement release-driven direct propagation and v1 workflow pinning (#17) (20cf61e)
+* **release:** implement native release staging engine and resolve CI issues (#14) (eedfdd4)
+* **templates:** embed PR audit trail, add operability sections, and exempt AgentVault (#12) (34458de)
+
+### Bug Fixes
+
+* **ci:** remove invalid secrets context from release workflow caller (#15) (597a56c)
+
 ## 1.0.0 (2026-11-03)
 
 
