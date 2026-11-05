@@ -671,9 +671,22 @@ func ApplyBranchRuleset(repoSlug string, defaultBranch string, requiredChecks []
 	}
 
 	if requiredChecks == nil {
-		requiredChecks = []string{
-			"Quality Gate / Verification",
-			"Quality Gate / Title Validation",
+		isHub := strings.EqualFold(repoSlug, "Cooper-Wallace/repokit") || strings.HasSuffix(strings.ToLower(repoSlug), "/repokit")
+		if !isHub && IsGovernanceHub(".") {
+			if localSlug, err := GetRepoSlug("."); err == nil && strings.EqualFold(localSlug, repoSlug) {
+				isHub = true
+			}
+		}
+		if isHub {
+			requiredChecks = []string{
+				"Quality Gate / Verification",
+				"Quality Gate / Title Validation",
+			}
+		} else {
+			requiredChecks = []string{
+				"ci / Quality Gate / Verification",
+				"validate-pr / Quality Gate / Title Validation",
+			}
 		}
 	}
 
@@ -1127,7 +1140,9 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 											for _, checkRaw := range reqChecks {
 												if checkMap, ok := checkRaw.(map[string]interface{}); ok {
 													if ctx, ok := checkMap["context"].(string); ok {
-														if strings.Contains(ctx, "Quality Gate / Verification") || strings.Contains(ctx, "Test & Coverage") {
+														if strings.Contains(ctx, "Quality Gate / Verification") ||
+															strings.Contains(ctx, "Quality Gate / Title Validation") ||
+															strings.Contains(ctx, "Test & Coverage") {
 															rulesetHasStatusChecks = true
 															break
 														}
@@ -2401,6 +2416,8 @@ func ExecuteRelease(opts ReleaseOptions) (*ReleaseResult, error) {
 			requiredContexts := []string{
 				"Quality Gate / Verification",
 				"Quality Gate / Title Validation",
+				"ci / Quality Gate / Verification",
+				"validate-pr / Quality Gate / Title Validation",
 				"Test & Coverage",
 				"Validate Conventional Commit PR Title",
 				"ci / Test & Coverage",

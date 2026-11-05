@@ -741,12 +741,12 @@ func TestApplyBranchRuleset(t *testing.T) {
 				params := rMap["parameters"].(map[string]interface{})
 				checks := params["required_status_checks"].([]interface{})
 				c0 := checks[0].(map[string]interface{})
-				if c0["context"] != "Quality Gate / Verification" {
-					t.Errorf("Expected 'Quality Gate / Verification', got %v", c0["context"])
+				if c0["context"] != "ci / Quality Gate / Verification" {
+					t.Errorf("Expected 'ci / Quality Gate / Verification', got %v", c0["context"])
 				}
 				c1 := checks[1].(map[string]interface{})
-				if c1["context"] != "Quality Gate / Title Validation" {
-					t.Errorf("Expected 'Quality Gate / Title Validation', got %v", c1["context"])
+				if c1["context"] != "validate-pr / Quality Gate / Title Validation" {
+					t.Errorf("Expected 'validate-pr / Quality Gate / Title Validation', got %v", c1["context"])
 				}
 			}
 		}
@@ -907,6 +907,54 @@ func TestAuditRepositoryRemote(t *testing.T) {
 		passed, err := AuditRepository(tmpDir, "", false, true)
 		if err != nil || !passed {
 			t.Errorf("Expected remote audit to pass with Quality Gate / Verification, got passed=%v, err=%v", passed, err)
+		}
+	})
+
+	t.Run("pass_prefixed_quality_gate", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit" {
+				data := map[string]interface{}{
+					"allow_squash_merge":          true,
+					"allow_merge_commit":          false,
+					"allow_rebase_merge":          false,
+					"delete_branch_on_merge":      true,
+					"squash_merge_commit_title":   "PR_TITLE",
+					"squash_merge_commit_message": "PR_BODY",
+					"allow_auto_merge":            false,
+				}
+				bytes, _ := json.Marshal(data)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/rulesets" {
+				rulesets := []map[string]interface{}{
+					{
+						"name":        "default-branch-protection",
+						"enforcement": "active",
+						"rules": []map[string]interface{}{
+							{
+								"type": "required_status_checks",
+								"parameters": map[string]interface{}{
+									"required_status_checks": []map[string]string{
+										{"context": "ci / Quality Gate / Verification"},
+										{"context": "validate-pr / Quality Gate / Title Validation"},
+									},
+								},
+							},
+						},
+					},
+				}
+				bytes, _ := json.Marshal(rulesets)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/actions/permissions/workflow" {
+				return `{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": true}`, "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		passed, err := AuditRepository(tmpDir, "", false, true)
+		if err != nil || !passed {
+			t.Errorf("Expected remote audit to pass with prefixed Quality Gate checks, got passed=%v, err=%v", passed, err)
 		}
 	})
 
@@ -2601,8 +2649,8 @@ func TestExecuteRelease(t *testing.T) {
 				foundStatusCert++
 			}
 		}
-		if foundStatusCert != 6 {
-			t.Errorf("Expected 6 pre-certified status check calls, got %d", foundStatusCert)
+		if foundStatusCert != 8 {
+			t.Errorf("Expected 8 pre-certified status check calls, got %d", foundStatusCert)
 		}
 	})
 
@@ -2672,8 +2720,8 @@ func TestExecuteRelease(t *testing.T) {
 		if !foundPrEdit {
 			t.Errorf("Expected gh pr edit 55")
 		}
-		if foundStatusCertExisting != 6 {
-			t.Errorf("Expected 6 pre-certified status check calls, got %d", foundStatusCertExisting)
+		if foundStatusCertExisting != 8 {
+			t.Errorf("Expected 8 pre-certified status check calls, got %d", foundStatusCertExisting)
 		}
 	})
 
