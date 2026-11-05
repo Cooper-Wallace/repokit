@@ -29,6 +29,10 @@ func TestConventionalCommits(t *testing.T) {
 		"feat(nav): add goal pose callback",
 		"fix(laser-driver)!: breaking protocol change",
 		"chore(deps): update ros2 packages",
+		"release(1.1.0): candidate release",
+		"release: v1.1.0",
+		"release(v1.1.0): candidate release",
+		"release: candidate release",
 	}
 
 	for _, msg := range valid {
@@ -687,7 +691,11 @@ func TestApplyBranchRuleset(t *testing.T) {
 				params := rMap["parameters"].(map[string]interface{})
 				checks := params["required_status_checks"].([]interface{})
 				if len(checks) == 2 {
-					hasStatusChecks = true
+					c0 := checks[0].(map[string]interface{})
+					c1 := checks[1].(map[string]interface{})
+					if c0["context"] == "Quality Gate / Verification" && c1["context"] == "Quality Gate / Title Validation" {
+						hasStatusChecks = true
+					}
 				}
 			}
 		}
@@ -695,7 +703,7 @@ func TestApplyBranchRuleset(t *testing.T) {
 			t.Errorf("Expected pull_request rule with squash merge method")
 		}
 		if !hasStatusChecks {
-			t.Errorf("Expected required_status_checks rule with 2 checks")
+			t.Errorf("Expected required_status_checks rule with Quality Gate checks")
 		}
 	})
 
@@ -733,8 +741,12 @@ func TestApplyBranchRuleset(t *testing.T) {
 				params := rMap["parameters"].(map[string]interface{})
 				checks := params["required_status_checks"].([]interface{})
 				c0 := checks[0].(map[string]interface{})
-				if c0["context"] != "ci / Test & Coverage" {
-					t.Errorf("Expected 'ci / Test & Coverage', got %v", c0["context"])
+				if c0["context"] != "Quality Gate / Verification" {
+					t.Errorf("Expected 'Quality Gate / Verification', got %v", c0["context"])
+				}
+				c1 := checks[1].(map[string]interface{})
+				if c1["context"] != "Quality Gate / Title Validation" {
+					t.Errorf("Expected 'Quality Gate / Title Validation', got %v", c1["context"])
 				}
 			}
 		}
@@ -847,6 +859,54 @@ func TestAuditRepositoryRemote(t *testing.T) {
 		passed, err := AuditRepository(tmpDir, "", false, true)
 		if err != nil || !passed {
 			t.Errorf("Expected remote audit to pass, got passed=%v, err=%v", passed, err)
+		}
+	})
+
+	t.Run("pass_quality_gate_verification", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit" {
+				data := map[string]interface{}{
+					"allow_squash_merge":          true,
+					"allow_merge_commit":          false,
+					"allow_rebase_merge":          false,
+					"delete_branch_on_merge":      true,
+					"squash_merge_commit_title":   "PR_TITLE",
+					"squash_merge_commit_message": "PR_BODY",
+					"allow_auto_merge":            false,
+				}
+				bytes, _ := json.Marshal(data)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/rulesets" {
+				rulesets := []map[string]interface{}{
+					{
+						"name":        "default-branch-protection",
+						"enforcement": "active",
+						"rules": []map[string]interface{}{
+							{
+								"type": "required_status_checks",
+								"parameters": map[string]interface{}{
+									"required_status_checks": []map[string]string{
+										{"context": "Quality Gate / Verification"},
+										{"context": "Quality Gate / Title Validation"},
+									},
+								},
+							},
+						},
+					},
+				}
+				bytes, _ := json.Marshal(rulesets)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/actions/permissions/workflow" {
+				return `{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": true}`, "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		passed, err := AuditRepository(tmpDir, "", false, true)
+		if err != nil || !passed {
+			t.Errorf("Expected remote audit to pass with Quality Gate / Verification, got passed=%v, err=%v", passed, err)
 		}
 	})
 
@@ -1693,7 +1753,7 @@ func TestRulesetIDFormatting(t *testing.T) {
 			}
 			if len(args) > 2 && strings.HasPrefix(args[2], "repos/org/repo/rulesets/") {
 				detailQueriedURL = args[2]
-				return `{"rules": [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "ci"}]}}]}`, "", 0, nil
+				return `{"rules": [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "Quality Gate / Verification"}]}}]}`, "", 0, nil
 			}
 			if len(args) > 2 && args[2] == "repos/org/repo/actions/permissions/workflow" {
 				return `{"can_approve_pull_request_reviews": true}`, "", 0, nil
@@ -2305,7 +2365,7 @@ func TestExecuteRelease(t *testing.T) {
 				return tmpDir + "\n", "", 0, nil
 			}
 			if len(args) >= 3 && args[0] == "git" && args[1] == "log" {
-				return "chore(release): release v1.1.0\n", "", 0, nil
+				return "release(v1.1.0): candidate release\n", "", 0, nil
 			}
 			if len(args) >= 3 && args[0] == "git" && args[1] == "rev-parse" {
 				// tag does not exist yet
@@ -2383,6 +2443,46 @@ func TestExecuteRelease(t *testing.T) {
 		}
 	})
 
+	t.Run("Mode A: Release Promotion - Legacy Format", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		outFile := filepath.Join(tmpDir, "github_output")
+		changelogPath := filepath.Join(tmpDir, "CHANGELOG.md")
+		_ = os.WriteFile(changelogPath, []byte("# Changelog\n\n## 1.1.0 (2026-11-04)\n\n### Features\n\n* new feature (abc1234)\n"), 0644)
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "rev-parse" {
+				return tmpDir + "\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" {
+				return "chore(release): release v1.1.0\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "rev-parse" {
+				return "", "", 1, nil
+			}
+			if len(args) >= 2 && args[0] == "gh" && args[1] == "release" && args[2] == "view" {
+				return "", "", 1, nil
+			}
+			return "", "", 0, nil
+		}
+
+		opts := ReleaseOptions{
+			Path:       tmpDir,
+			OutputFile: outFile,
+			DryRun:     false,
+		}
+
+		res, err := ExecuteRelease(opts)
+		if err != nil {
+			t.Fatalf("ExecuteRelease failed: %v", err)
+		}
+		if !res.ReleasesCreated {
+			t.Fatalf("Expected ReleasesCreated=true in Mode A legacy")
+		}
+		if res.TagName != "v1.1.0" || res.Version != "1.1.0" {
+			t.Errorf("Expected v1.1.0, got %s / %s", res.TagName, res.Version)
+		}
+	})
+
 	t.Run("Mode B: Release Staging - New PR", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		outFile := filepath.Join(tmpDir, "github_output")
@@ -2446,9 +2546,23 @@ func TestExecuteRelease(t *testing.T) {
 		foundCheckoutMain := false
 		foundSemanticPR := false
 		foundTestWorkflow := false
+		foundCommitRelease := false
 		for _, cmd := range executedCmds {
 			if len(cmd) >= 4 && cmd[0] == "gh" && cmd[1] == "pr" && cmd[2] == "create" {
 				foundPrCreate = true
+				for i, arg := range cmd {
+					if arg == "--title" && i+1 < len(cmd) {
+						if cmd[i+1] != "release(v1.1.0): candidate release" {
+							t.Errorf("Expected PR title 'release(v1.1.0): candidate release', got %s", cmd[i+1])
+						}
+					}
+				}
+			}
+			if len(cmd) >= 3 && cmd[0] == "git" && cmd[1] == "commit" && cmd[2] == "-m" {
+				foundCommitRelease = true
+				if cmd[3] != "release(v1.1.0): candidate release" {
+					t.Errorf("Expected commit msg 'release(v1.1.0): candidate release', got %s", cmd[3])
+				}
 			}
 			if len(cmd) >= 4 && cmd[0] == "git" && cmd[1] == "checkout" && cmd[2] == "-B" && cmd[3] == "release-staging" {
 				foundCheckoutStaging = true
@@ -2465,6 +2579,9 @@ func TestExecuteRelease(t *testing.T) {
 		}
 		if !foundCheckoutStaging {
 			t.Errorf("Expected git checkout -B release-staging")
+		}
+		if !foundCommitRelease {
+			t.Errorf("Expected git commit with candidate release message")
 		}
 		if !foundPrCreate {
 			t.Errorf("Expected gh pr create")
@@ -2484,8 +2601,8 @@ func TestExecuteRelease(t *testing.T) {
 				foundStatusCert++
 			}
 		}
-		if foundStatusCert != 4 {
-			t.Errorf("Expected 4 pre-certified status check calls, got %d", foundStatusCert)
+		if foundStatusCert != 6 {
+			t.Errorf("Expected 6 pre-certified status check calls, got %d", foundStatusCert)
 		}
 	})
 
@@ -2540,6 +2657,13 @@ func TestExecuteRelease(t *testing.T) {
 		for _, cmd := range executedCmds {
 			if len(cmd) >= 4 && cmd[0] == "gh" && cmd[1] == "pr" && cmd[2] == "edit" && cmd[3] == "55" {
 				foundPrEdit = true
+				for i, arg := range cmd {
+					if arg == "--title" && i+1 < len(cmd) {
+						if cmd[i+1] != "release(v1.1.1): candidate release" {
+							t.Errorf("Expected PR title 'release(v1.1.1): candidate release', got %s", cmd[i+1])
+						}
+					}
+				}
 			}
 			if len(cmd) >= 5 && cmd[0] == "gh" && cmd[1] == "api" && cmd[2] == "--method" && cmd[3] == "POST" && strings.Contains(cmd[4], "statuses") {
 				foundStatusCertExisting++
@@ -2548,8 +2672,8 @@ func TestExecuteRelease(t *testing.T) {
 		if !foundPrEdit {
 			t.Errorf("Expected gh pr edit 55")
 		}
-		if foundStatusCertExisting != 4 {
-			t.Errorf("Expected 4 pre-certified status check calls, got %d", foundStatusCertExisting)
+		if foundStatusCertExisting != 6 {
+			t.Errorf("Expected 6 pre-certified status check calls, got %d", foundStatusCertExisting)
 		}
 	})
 

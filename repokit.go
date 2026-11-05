@@ -29,7 +29,7 @@ const (
 // Core Constants.
 const (
 	DefaultGovernanceRepo = "Cooper-Wallace/repokit"
-	CommitPattern         = `^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_.-]+\))?!?: .+$`
+	CommitPattern         = `^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|release)(\([a-zA-Z0-9_.-]+\))?!?: .+$`
 	DefaultStagingBranch  = "release-staging"
 
 	CommitMsgHook = `#!/usr/bin/env bash
@@ -47,16 +47,17 @@ if echo "$COMMIT_MSG" | grep -Eq "^(Merge|fixup!|squash!)"; then
 fi
 
 # Conventional Commits regex: type(optional-scope)!: description
-PATTERN="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_.-]+\))?!?: .+$"
+PATTERN="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|release)(\([a-zA-Z0-9_.-]+\))?!?: .+$"
 
 if ! echo "$COMMIT_MSG" | grep -Eq "$PATTERN"; then
     echo -e "\033[1;31m[ERROR] Commit rejected: Message does not follow Conventional Commits.\033[0m"
     echo -e "\033[1;33mExpected:\033[0m <type>(<scope optional>): <description>"
-    echo -e "\033[1;33mAllowed Types:\033[0m feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+    echo -e "\033[1;33mAllowed Types:\033[0m feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert, release"
     echo -e "\033[1;33mExamples:\033[0m"
     echo "  feat(laser): add pointcloud downsampling"
     echo "  fix(launch): correct topic remapping in simulation"
     echo "  docs(readme): add setup and launch instructions"
+    echo "  release(1.1.0): candidate release"
     echo -e "\033[1;31mYour input:\033[0m \"$COMMIT_MSG\""
     exit 1
 fi
@@ -100,6 +101,7 @@ fi
 - [ ] ` + "`test`" + `: New or updated tests
 - [ ] ` + "`ci`" + `: CI/CD pipeline or build configuration
 - [ ] ` + "`chore`" + `: Maintenance, dependencies, or tooling
+- [ ] ` + "`release`" + `: Release candidate or version staging
 
 ## Key Changes
 <!-- Bullet points detailing the specific changes made. -->
@@ -170,6 +172,7 @@ jobs:
             ci
             chore
             revert
+            release
           requireScope: false
 `
 
@@ -668,10 +671,9 @@ func ApplyBranchRuleset(repoSlug string, defaultBranch string, requiredChecks []
 	}
 
 	if requiredChecks == nil {
-		if strings.HasSuffix(repoSlug, "/repokit") || repoSlug == "repokit" {
-			requiredChecks = []string{"Test & Coverage", "Validate Conventional Commit PR Title"}
-		} else {
-			requiredChecks = []string{"ci / Test & Coverage", "validate-pr / Validate Conventional Commit PR Title"}
+		requiredChecks = []string{
+			"Quality Gate / Verification",
+			"Quality Gate / Title Validation",
 		}
 	}
 
@@ -1122,7 +1124,16 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 								if ruleMap["type"] == "required_status_checks" {
 									if params, ok := ruleMap["parameters"].(map[string]interface{}); ok {
 										if reqChecks, ok := params["required_status_checks"].([]interface{}); ok {
-											rulesetHasStatusChecks = len(reqChecks) > 0
+											for _, checkRaw := range reqChecks {
+												if checkMap, ok := checkRaw.(map[string]interface{}); ok {
+													if ctx, ok := checkMap["context"].(string); ok {
+														if strings.Contains(ctx, "Quality Gate / Verification") || strings.Contains(ctx, "Test & Coverage") {
+															rulesetHasStatusChecks = true
+															break
+														}
+													}
+												}
+											}
 										} else {
 											rulesetHasStatusChecks = true
 										}
@@ -1901,7 +1912,7 @@ func CalculateNextVersion(currentTag string, commits []string) (major, minor, pa
 	hasFeat := false
 	hasFix := false
 
-	releaseRegex := regexp.MustCompile(`^chore\((?:release|main|staging)\): release`)
+	releaseRegex := regexp.MustCompile(`^(?:chore\((?:release|main|staging)\): release|release(?:\([^\)]+\))?!?: (?:candidate )?release)`)
 	commitHeaderRegex := regexp.MustCompile(`^([a-zA-Z0-9_-]+)(?:\(([^\)]+)\))?(!)?:\s*(.+)$`)
 
 	for _, c := range commits {
@@ -1965,7 +1976,7 @@ func CalculateNextVersion(currentTag string, commits []string) (major, minor, pa
 
 // FormatChangelogSection formats a markdown section for a release version.
 func FormatChangelogSection(version string, dateStr string, commits []string) string {
-	releaseRegex := regexp.MustCompile(`^chore\((?:release|main|staging)\): release`)
+	releaseRegex := regexp.MustCompile(`^(?:chore\((?:release|main|staging)\): release|release(?:\([^\)]+\))?!?: (?:candidate )?release)`)
 	commitHeaderRegex := regexp.MustCompile(`^([a-zA-Z0-9_-]+)(?:\(([^\)]+)\))?(!)?:\s*(.+)$`)
 
 	var breaking []string
@@ -2212,14 +2223,24 @@ func ExecuteRelease(opts ReleaseOptions) (*ReleaseResult, error) {
 	}
 	headSubject = strings.TrimSpace(headSubject)
 
-	reModeA := regexp.MustCompile(`^chore\((?:release|main|staging)\): release v?(\d+\.\d+\.\d+)`)
-	matchA := reModeA.FindStringSubmatch(headSubject)
+	reModeA := regexp.MustCompile(`^(?:chore\((?:release|main|staging)\): release|release(?:\([^\)]+\))?!?: (?:candidate )?release) v?(\d+\.\d+\.\d+)`)
+	reCandidate := regexp.MustCompile(`^release(?:\(v?(\d+\.\d+\.\d+)\))?!?: candidate release`)
 
-	if matchA != nil {
+	var promoVersion string
+	if matchA := reModeA.FindStringSubmatch(headSubject); matchA != nil {
+		promoVersion = matchA[1]
+	} else if matchCand := reCandidate.FindStringSubmatch(headSubject); matchCand != nil && len(matchCand) > 1 && matchCand[1] != "" {
+		promoVersion = matchCand[1]
+	}
+
+	if promoVersion != "" {
 		// Mode A: Release Promotion
-		version := matchA[1]
+		version := promoVersion
+		major, minor, patch, ok := ParseSemVer(promoVersion)
+		if ok {
+			version = fmt.Sprintf("%d.%d.%d", major, minor, patch)
+		}
 		tagName := "v" + version
-		major, minor, patch, _ := ParseSemVer(version)
 
 		notes := "Release " + tagName
 		changelogPath := filepath.Join(repoRoot, "CHANGELOG.md")
@@ -2348,7 +2369,7 @@ func ExecuteRelease(opts ReleaseOptions) (*ReleaseResult, error) {
 			return nil, fmt.Errorf("failed to git add CHANGELOG.md: %w", err)
 		}
 
-		commitMsg := fmt.Sprintf("chore(release): release %s", tagName)
+		commitMsg := fmt.Sprintf("release(%s): candidate release", tagName)
 		if _, _, code, err := RunCmd([]string{"git", "commit", "-m", commitMsg}, repoRoot); err != nil || code != 0 {
 			return nil, fmt.Errorf("failed to commit changelog update: %w", err)
 		}
@@ -2358,7 +2379,7 @@ func ExecuteRelease(opts ReleaseOptions) (*ReleaseResult, error) {
 		}
 
 		prOut, _, _, _ := RunCmd([]string{"gh", "pr", "list", "--head", opts.StagingBranch, "--base", opts.TargetBranch, "--state", "open", "--json", "number", "--jq", ".[0].number"}, repoRoot)
-		prTitle := fmt.Sprintf("chore(release): release %s", tagName)
+		prTitle := fmt.Sprintf("release(%s): candidate release", tagName)
 		prBody := fmt.Sprintf("## Release Staging: %s\n\n%s\n---\n\n## Quality Gates & Sign-Off Checklist\n- [ ] **Gate 1: Automated Quality Gates** (All CI checks pass)\n- [ ] **Gate 2: Agent Review Verification** (Adversarial diff review conducted; no regressions)\n- [ ] **Gate 3: Human Review & Manual Promotion** (PR reviewed by human developer; merge must only be triggered manually in the GitHub UI, never automated)\n", tagName, changelogSection)
 
 		prNum := strings.TrimSpace(prOut)
@@ -2378,6 +2399,8 @@ func ExecuteRelease(opts ReleaseOptions) (*ReleaseResult, error) {
 		slug, _ := GetRepoSlug(repoRoot)
 		if slug != "" && stagingSha != "" {
 			requiredContexts := []string{
+				"Quality Gate / Verification",
+				"Quality Gate / Title Validation",
 				"Test & Coverage",
 				"Validate Conventional Commit PR Title",
 				"ci / Test & Coverage",

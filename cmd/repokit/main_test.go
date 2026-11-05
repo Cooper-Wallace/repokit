@@ -207,7 +207,21 @@ func TestReleaseCLI(t *testing.T) {
 		t.Errorf("Expected 0 for release with inline branches, got %d", code)
 	}
 
-	// Release Mode A promotion
+	// Release Mode A promotion - candidate release format
+	repokit.CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+		if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "rev-parse" {
+			return tmpDir + "\n", "", 0, nil
+		}
+		if len(args) >= 3 && args[0] == "git" && args[1] == "log" && args[2] == "-1" {
+			return "release(v1.0.1): candidate release\n", "", 0, nil
+		}
+		return "", "", 0, nil
+	}
+	if code := run([]string{"release", tmpDir, "--dry-run"}); code != 0 {
+		t.Errorf("Expected 0 for release Mode A promotion (candidate format), got %d", code)
+	}
+
+	// Release Mode A promotion - legacy format
 	repokit.CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 		if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "rev-parse" {
 			return tmpDir + "\n", "", 0, nil
@@ -218,7 +232,7 @@ func TestReleaseCLI(t *testing.T) {
 		return "", "", 0, nil
 	}
 	if code := run([]string{"release", tmpDir, "--dry-run"}); code != 0 {
-		t.Errorf("Expected 0 for release Mode A promotion, got %d", code)
+		t.Errorf("Expected 0 for release Mode A promotion (legacy format), got %d", code)
 	}
 
 	// Release not in git repo
