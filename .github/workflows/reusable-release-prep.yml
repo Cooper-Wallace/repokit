@@ -50,6 +50,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      statuses: write
+      actions: write
     outputs:
       releases_created: ${{ steps.release.outputs.releases_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}

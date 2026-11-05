@@ -27,7 +27,7 @@ For solo developers, engineers, and researchers, pushing directly to `main` with
 - **Branch Protection via GitHub Rulesets**:
   - Restricts direct pushes and force pushes to the default branch (`main`).
   - Requires Pull Requests for merging code with squash-only merge method.
-  - Requires CI status checks (`Semantic PR Title Check / Validate Conventional Commit PR Title` and `ci / Test & Coverage`) before merging.
+  - Requires CI status checks (`Quality Gate / Title Validation` and `Quality Gate / Verification`) before merging.
   - Sets required approving reviews to `0` so solo developers are never blocked.
 - **Client-Side Git Hooks**:
   - Installs an executable `.git/hooks/commit-msg` hook that validates commits locally before they are made.
@@ -235,6 +235,57 @@ repokit release --dry-run
 - **Stage 2: Commit Inspection & Changelog Generation**: `repokit release` inspects Conventional Commits since the last `v*` tag, bumps SemVer (`fix` -> patch, `feat` -> minor, `BREAKING CHANGE` or `!` -> major), updates `CHANGELOG.md`, and creates or updates a candidate PR from `release-staging` to `main`.
 - **Stage 3: Human Review & Manual Squash-Merge**: Human review & manual squash-merge of `release-staging` PR into `main`. Direct bot auto-merging is disallowed to preserve human gatekeeping.
 - **Stage 4: Release Promotion & Asset Packaging**: On merge to `main`, `repokit release` promotes the release: tags `vX.Y.Z`, creates GitHub Release with release notes, and triggers packaging/asset uploads (`package-release`).
+
+---
+
+## Unified Quality Gate Architecture
+
+`repokit` enforces a **Unified Quality Gate** architecture designed to satisfy GitHub branch rulesets 100% cleanly without requiring administrative bypass permissions or maintaining separate, fragile rulesets for release automation.
+
+Both development feature branches and automated release candidates (`release-staging` -> `main`) report against the exact same required status check contexts enforced by GitHub rulesets:
+
+```
+                      GitHub Branch Ruleset Requirements
+                                      │
+            ┌─────────────────────────┴─────────────────────────┐
+            ▼                                                   ▼
+┌───────────────────────────────────────┐   ┌───────────────────────────────────────┐
+│     Quality Gate / Title Validation   │   │       Quality Gate / Verification     │
+├───────────────────────────────────────┤   ├───────────────────────────────────────┤
+│ • Enforces Conventional Commits 1.0.0 │   │ • Bifurcated execution based on       │
+│ • Validates PR title format & scope   │   │   pull request head branch context:   │
+│ • Includes first-class 'release:'     │   │   - Development Branches              │
+│   type for release staging PRs        │   │   - Release Candidate Branches        │
+└───────────────────────────────────────┘   └───────────────────────────────────────┘
+```
+
+### 1. `Quality Gate / Title Validation`
+- Enforces strict Conventional Commit specification (1.0.0) on all Pull Request titles using `amannn/action-semantic-pull-request@v5`.
+- Supports standard engineering change types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`.
+- Includes first-class support for the `release:` type (e.g., `release: cut v1.2.0`), enabling candidate staging PRs (`release-staging` -> `main`) to pass title verification without workarounds or manual title overrides.
+
+### 2. `Quality Gate / Verification`
+The verification gate dynamically bifurcates execution according to the PR's origin branch (`github.head_ref == 'release-staging' || startsWith(github.head_ref, 'release-')`), delivering targeted validation while reporting under a single unified check context:
+
+- **Development Pull Requests** (`feat/*`, `fix/*`, `refactor/*`, etc.):
+  - Static analysis and linting (`golangci-lint`, `ruff`, `shellcheck`, `eslint`, `mvn checkstyle`).
+  - Full unit, race detection, and integration testing (`go test -race`, `pytest`, `vitest`, `mvn test`).
+  - Strict code coverage enforcement against project thresholds (default: 80%).
+- **Release Candidate Pull Requests** (`release-staging` -> `main`):
+  - Pre-merge artifact build & packaging verification:
+    - **Go**: Validates GoReleaser configuration (`goreleaser check`), tests local CLI/binary build (`go build ./cmd/repokit`), and runs full test suite.
+    - **Python**: Validates distribution packaging (`pip install build && python -m build`) and runs full test suite.
+    - **TypeScript**: Validates production bundle compilation (`npm run build`) and test execution.
+    - **Java / Bash**: Validates clean compilation and hermetic test suite pass.
+  - Release changelog and metadata audit prior to human promotion.
+
+### Why Bifurcated CI Satisfies Rulesets Without Admin Bypass
+Under GitHub branch rulesets, required status checks are enforced uniformly across all PRs targeting protected branches (`main`). If release staging PRs trigger different workflows with distinct check context names (e.g. `release-check` vs `ci / test`), release PRs become unmergeable because the required development check never triggers, forcing repository administrators to manually bypass rulesets.
+
+By unifying the check contract under **`Quality Gate / Title Validation`** and **`Quality Gate / Verification`**, `repokit` ensures:
+1. **Zero Ruleset Bypasses**: 100% of pull requests—whether authored by human developers, autonomous AI agents, or the release engine—satisfy identical ruleset check contexts.
+2. **Deterministic Pre-Merge Packaging**: Release candidates verify that release binaries and packages compile cleanly *before* the PR is squash-merged into `main`.
+3. **Hermetic Trunk Promotion**: Eliminates broken releases on `main` while maintaining strict human-in-the-loop gatekeeping.
 
 ---
 

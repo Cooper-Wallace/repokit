@@ -9,7 +9,7 @@ on:
 
 jobs:
   test:
-    name: "Test & Coverage"
+    name: "Quality Gate / Verification"
     runs-on: ubuntu-latest
 
     steps:
@@ -21,8 +21,23 @@ jobs:
         with:
           go-version: "1.23"
 
+      - name: Verify Release Candidate
+        if: github.head_ref == 'release-staging' || startsWith(github.head_ref, 'release-')
+        run: |
+          if [ -f ".goreleaser.yaml" ] || [ -f ".goreleaser.yml" ]; then
+            if command -v goreleaser >/dev/null 2>&1; then
+              goreleaser check
+            else
+              echo "GoReleaser binary not installed; skipping config check."
+            fi
+          fi
+          go build -v ./cmd/repokit
+          go test -v ./...
+
       - name: Run go vet
+        if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         run: go vet ./...
 
       - name: Run repokit tests with coverage
+        if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...

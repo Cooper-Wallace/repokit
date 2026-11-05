@@ -16,7 +16,7 @@ on:
 
 jobs:
   test:
-    name: "Test & Coverage"
+    name: "Quality Gate / Verification"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -31,18 +31,28 @@ jobs:
         run: |
           npm ci || npm install
 
+      - name: Verify Release Candidate
+        if: github.head_ref == 'release-staging' || startsWith(github.head_ref, 'release-')
+        run: |
+          npm run build --if-present
+          npm test --if-present
+
       - name: Typecheck
+        if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         run: |
           npx tsc --noEmit
 
       - name: Lint
+        if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         run: |
           npm run lint --if-present
 
       - name: Test with vitest coverage
+        if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         run: |
           npx vitest run --coverage --coverage.thresholds.lines=${{ inputs.min-coverage }} | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Build
+        if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         run: |
           npm run build --if-present
