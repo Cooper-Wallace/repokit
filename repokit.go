@@ -607,6 +607,8 @@ func ApplyWorkflowPermissions(repoSlug string) error {
 
 func ApplyGitHubRepoSettings(repoSlug string) error {
 	LogInfo("Applying GitHub merge and branch cleanup settings to %s...", repoSlug)
+	isHub := strings.EqualFold(repoSlug, "Cooper-Wallace/repokit") || strings.HasSuffix(strings.ToLower(repoSlug), "/repokit")
+	allowAutoMerge := !isHub
 	payload := map[string]interface{}{
 		"allow_squash_merge":          true,
 		"allow_merge_commit":          false,
@@ -615,7 +617,7 @@ func ApplyGitHubRepoSettings(repoSlug string) error {
 		"allow_update_branch":         true,
 		"squash_merge_commit_title":   "PR_TITLE",
 		"squash_merge_commit_message": "PR_BODY",
-		"allow_auto_merge":            false,
+		"allow_auto_merge":            allowAutoMerge,
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -1107,7 +1109,13 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 		titleIsPR := ghData["squash_merge_commit_title"] == "PR_TITLE"
 		msgVal, _ := ghData["squash_merge_commit_message"].(string)
 		msgIsPR := msgVal == "PR_BODY" || msgVal == "BLANK"
-		autoMergeDisabled := ghData["allow_auto_merge"] == false
+		isHub := strings.EqualFold(slug, "Cooper-Wallace/repokit") || strings.HasSuffix(strings.ToLower(slug), "/repokit") || IsGovernanceHub(repoRoot)
+		autoMergeLabel := "Auto-Merge Configured for CI-Gated Sync"
+		autoMergePassed := ghData["allow_auto_merge"] == true
+		if isHub {
+			autoMergeLabel = "Auto-Merge Disabled (Human Gate)"
+			autoMergePassed = ghData["allow_auto_merge"] == false
+		}
 
 		stdoutRules, _, codeRules, _ := RunCmd([]string{"gh", "api", fmt.Sprintf("repos/%s/rulesets", slug)}, "")
 		hasRuleset := false
@@ -1181,7 +1189,7 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 			{Label: "Auto-Delete Head Branches on Merge", Passed: deleteBranch},
 			{Label: "Squash Commit Title set to PR_TITLE", Passed: titleIsPR},
 			{Label: "Squash Commit Message set to PR_BODY", Passed: msgIsPR},
-			{Label: "Auto-Merge Disabled (Human Gate)", Passed: autoMergeDisabled},
+			{Label: autoMergeLabel, Passed: autoMergePassed},
 			{Label: "Default Branch Protection Ruleset Active", Passed: hasRuleset},
 			{Label: "Branch Ruleset Enforces Required Status Checks", Passed: rulesetHasStatusChecks},
 			{Label: "GitHub Actions Permitted to Create/Approve PRs (Workflow Permissions)", Passed: canApprovePRs},
@@ -1805,6 +1813,17 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 
 		// 2. Local repository configuration & PR creation / direct commit
 		if localPath != "" {
+			token := os.Getenv("GH_PAT")
+			if token == "" {
+				token = os.Getenv("GITHUB_TOKEN")
+			}
+			if token == "" {
+				token = os.Getenv("GH_TOKEN")
+			}
+			if token != "" {
+				RunCmd([]string{"git", "-C", localPath, "remote", "set-url", "origin", fmt.Sprintf("https://x-access-token:%s@github.com/%s.git", token, slug)}, "")
+			}
+
 			if err := ConfigureRepository(localPath, opts.Force); err != nil {
 				LogWarn("Failed to configure local repository at %s: %v", localPath, err)
 			}
@@ -1855,8 +1874,14 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 						"--title", commitMsg,
 						"--body", prBody,
 					}, localPath)
-					if prCode == 0 {
-						LogSuccess("Created PR for %s: %s", slug, strings.TrimSpace(prOut))
+					if prCode == 0 || strings.Contains(strings.ToLower(prErr), "a pull request") || strings.Contains(strings.ToLower(prOut), "a pull request") || strings.Contains(strings.ToLower(prErr), "already exists") {
+						if prCode == 0 {
+							LogSuccess("Created PR for %s: %s", slug, strings.TrimSpace(prOut))
+						} else {
+							LogInfo("PR for %s already exists.", slug)
+						}
+						RunCmd([]string{"gh", "pr", "merge", "chore/repokit-sync", "--auto", "--squash", "--repo", slug}, localPath)
+						LogInfo("Enabled CI-gated auto-merge on chore/repokit-sync for %s", slug)
 					} else {
 						LogWarn("gh pr create for %s: %s", slug, strings.TrimSpace(prErr))
 					}
