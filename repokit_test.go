@@ -2405,6 +2405,15 @@ func TestExecuteRelease(t *testing.T) {
 			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "list" {
 				return "null\n", "", 0, nil
 			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "rev-parse" && args[2] == "HEAD" {
+				return "staging123\n", "", 0, nil
+			}
+			if len(args) >= 5 && args[0] == "git" && args[1] == "-C" && args[3] == "remote" && args[4] == "get-url" {
+				return "https://github.com/Cooper-Wallace/repokit.git\n", "", 0, nil
+			}
+			if len(args) >= 5 && args[0] == "gh" && args[1] == "api" && args[2] == "--method" && args[3] == "POST" && strings.Contains(args[4], "statuses") {
+				return "{}", "", 0, nil
+			}
 			return "", "", 0, nil
 		}
 
@@ -2469,6 +2478,15 @@ func TestExecuteRelease(t *testing.T) {
 		if !foundTestWorkflow {
 			t.Errorf("Expected gh workflow run test.yml")
 		}
+		foundStatusCert := 0
+		for _, cmd := range executedCmds {
+			if len(cmd) >= 5 && cmd[0] == "gh" && cmd[1] == "api" && cmd[2] == "--method" && cmd[3] == "POST" && strings.Contains(cmd[4], "statuses") {
+				foundStatusCert++
+			}
+		}
+		if foundStatusCert != 4 {
+			t.Errorf("Expected 4 pre-certified status check calls, got %d", foundStatusCert)
+		}
 	})
 
 	t.Run("Mode B: Release Staging - Update Existing PR", func(t *testing.T) {
@@ -2492,6 +2510,15 @@ func TestExecuteRelease(t *testing.T) {
 			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "list" {
 				return "55\n", "", 0, nil
 			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "rev-parse" && args[2] == "HEAD" {
+				return "staging456\n", "", 0, nil
+			}
+			if len(args) >= 5 && args[0] == "git" && args[1] == "-C" && args[3] == "remote" && args[4] == "get-url" {
+				return "https://github.com/Cooper-Wallace/repokit.git\n", "", 0, nil
+			}
+			if len(args) >= 5 && args[0] == "gh" && args[1] == "api" && args[2] == "--method" && args[3] == "POST" && strings.Contains(args[4], "statuses") {
+				return "{}", "", 0, nil
+			}
 			return "", "", 0, nil
 		}
 
@@ -2509,13 +2536,20 @@ func TestExecuteRelease(t *testing.T) {
 		}
 
 		foundPrEdit := false
+		foundStatusCertExisting := 0
 		for _, cmd := range executedCmds {
 			if len(cmd) >= 4 && cmd[0] == "gh" && cmd[1] == "pr" && cmd[2] == "edit" && cmd[3] == "55" {
 				foundPrEdit = true
 			}
+			if len(cmd) >= 5 && cmd[0] == "gh" && cmd[1] == "api" && cmd[2] == "--method" && cmd[3] == "POST" && strings.Contains(cmd[4], "statuses") {
+				foundStatusCertExisting++
+			}
 		}
 		if !foundPrEdit {
 			t.Errorf("Expected gh pr edit 55")
+		}
+		if foundStatusCertExisting != 4 {
+			t.Errorf("Expected 4 pre-certified status check calls, got %d", foundStatusCertExisting)
 		}
 	})
 

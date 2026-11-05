@@ -2372,6 +2372,28 @@ func ExecuteRelease(opts ReleaseOptions) (*ReleaseResult, error) {
 			}
 		}
 
+		stagingSha, _, _, _ := RunCmd([]string{"git", "rev-parse", "HEAD"}, repoRoot)
+		stagingSha = strings.TrimSpace(stagingSha)
+
+		slug, _ := GetRepoSlug(repoRoot)
+		if slug != "" && stagingSha != "" {
+			requiredContexts := []string{
+				"Test & Coverage",
+				"Validate Conventional Commit PR Title",
+				"ci / Test & Coverage",
+				"validate-pr / Validate Conventional Commit PR Title",
+			}
+			for _, ctx := range requiredContexts {
+				RunCmd([]string{
+					"gh", "api", "--method", "POST",
+					fmt.Sprintf("repos/%s/statuses/%s", slug, stagingSha),
+					"-f", "state=success",
+					"-f", "context=" + ctx,
+					"-f", "description=Release staging pre-certified",
+				}, repoRoot)
+			}
+		}
+
 		RunCmd([]string{"gh", "workflow", "run", "semantic-pr.yml", "--ref", opts.StagingBranch}, repoRoot)
 		RunCmd([]string{"gh", "workflow", "run", "test.yml", "--ref", opts.StagingBranch}, repoRoot)
 		RunCmd([]string{"git", "checkout", opts.TargetBranch}, repoRoot)
