@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0 (2026-11-06)
+
+### Features
+
+* **propagation:** wait for downstream PR auto-merge and fail propagation on CI errors (#26) (5d6cad5)
+
 ## 1.2.0 (2026-11-06)
 
 ### Features
