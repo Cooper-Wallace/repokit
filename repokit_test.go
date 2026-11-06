@@ -817,11 +817,18 @@ func TestIsVaultOrExemptRepo(t *testing.T) {
 		{"agent-vault", true},
 		{"AgentVault", true},
 		{"Agent-Vault", true},
+		{"Cooper-Wallace/Cooper-Wallace", true},
+		{"cooper-wallace/cooper-wallace", true},
+		{"cooper-wallace/Cooper-Wallace", true},
+		{"octocat/octocat", true},
+		{"user/user", true},
 		{"Cooper-Wallace/agentkit", false},
 		{"Cooper-Wallace/repokit", false},
 		{"agentkit", false},
 		{"my-agent-vault-app", false},
 		{"", false},
+		{"/", false},
+		{"user/other", false},
 	}
 
 	for _, tc := range cases {
@@ -833,6 +840,40 @@ func TestIsVaultOrExemptRepo(t *testing.T) {
 			actual := IsVaultOrExemptRepo(tc.slug)
 			if actual != tc.expected {
 				t.Errorf("IsVaultOrExemptRepo(%q) = %v; want %v", tc.slug, actual, tc.expected)
+			}
+		})
+	}
+}
+
+func TestIsProfileRepo(t *testing.T) {
+	cases := []struct {
+		slug     string
+		expected bool
+	}{
+		{"Cooper-Wallace/Cooper-Wallace", true},
+		{"cooper-wallace/cooper-wallace", true},
+		{"cooper-wallace/Cooper-Wallace", true},
+		{"octocat/octocat", true},
+		{"user/user", true},
+		{"Cooper-Wallace/repokit", false},
+		{"Cooper-Wallace/AgentVault", false},
+		{"agentvault", false},
+		{"", false},
+		{"/", false},
+		{"//", false},
+		{"user/other", false},
+		{"a/b/c", false},
+	}
+
+	for _, tc := range cases {
+		name := tc.slug
+		if name == "" {
+			name = "empty_slug"
+		}
+		t.Run(name, func(t *testing.T) {
+			actual := IsProfileRepo(tc.slug)
+			if actual != tc.expected {
+				t.Errorf("IsProfileRepo(%q) = %v; want %v", tc.slug, actual, tc.expected)
 			}
 		})
 	}
@@ -1923,6 +1964,15 @@ func TestConfigureWithOptions(t *testing.T) {
 		return false
 	}
 
+	hasArg := func(cmdArgs []string, flag string) bool {
+		for _, a := range cmdArgs {
+			if a == flag {
+				return true
+			}
+		}
+		return false
+	}
+
 	t.Run("backward_compatible_propagate_no_repos_specified", func(t *testing.T) {
 		err := PropagateRepositories(PropagateOptions{})
 		if err == nil {
@@ -2032,6 +2082,7 @@ func TestConfigureWithOptions(t *testing.T) {
 		var prAutoMerged bool
 		var gitRemoteSetURL bool
 		var prCreateArgs []string
+		var prMergeArgs []string
 
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			if len(args) > 0 && args[0] == "git" {
@@ -2058,6 +2109,7 @@ func TestConfigureWithOptions(t *testing.T) {
 			}
 			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
 				prAutoMerged = true
+				prMergeArgs = args
 				return "", "", 0, nil
 			}
 			return "{}", "", 0, nil
@@ -2098,6 +2150,9 @@ func TestConfigureWithOptions(t *testing.T) {
 		if !prAutoMerged {
 			t.Errorf("Expected gh pr merge ... --auto --squash to be called")
 		}
+		if !hasArg(prMergeArgs, "--delete-branch") {
+			t.Errorf("Expected --delete-branch in gh pr merge args, got: %v", prMergeArgs)
+		}
 	})
 
 	t.Run("local_discovery_and_pr_creation_existing_pr", func(t *testing.T) {
@@ -2120,6 +2175,7 @@ func TestConfigureWithOptions(t *testing.T) {
 
 		var prAutoMergedExisting bool
 		var prCreateExistingArgs []string
+		var prMergeExistingArgs []string
 
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			if len(args) > 0 && args[0] == "git" {
@@ -2139,6 +2195,7 @@ func TestConfigureWithOptions(t *testing.T) {
 			}
 			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
 				prAutoMergedExisting = true
+				prMergeExistingArgs = args
 				return "", "", 0, nil
 			}
 			return "{}", "", 0, nil
@@ -2166,6 +2223,9 @@ func TestConfigureWithOptions(t *testing.T) {
 		}
 		if !prAutoMergedExisting {
 			t.Errorf("Expected gh pr merge --auto --squash to be called when PR already exists")
+		}
+		if !hasArg(prMergeExistingArgs, "--delete-branch") {
+			t.Errorf("Expected --delete-branch in gh pr merge args, got: %v", prMergeExistingArgs)
 		}
 	})
 
@@ -2353,8 +2413,8 @@ func TestConfigureWithOptions(t *testing.T) {
 		_ = cRemote.Run()
 		// Intentionally do NOT configure user.name and user.email in repoA
 
-		var setUserName, setUserEmail bool
-		var prCreateArgs []string
+		var setUserName, setUserEmail, prAutoMerged bool
+		var prCreateArgs, prMergeArgs []string
 
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			if len(args) >= 6 && args[0] == "git" && args[3] == "config" {
@@ -2384,6 +2444,8 @@ func TestConfigureWithOptions(t *testing.T) {
 				return "https://github.com/user/repo-no-ident/pull/1", "", 0, nil
 			}
 			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
+				prAutoMerged = true
+				prMergeArgs = args
 				return "", "", 0, nil
 			}
 			return "{}", "", 0, nil
@@ -2414,6 +2476,66 @@ func TestConfigureWithOptions(t *testing.T) {
 		}
 		if !hasArgPair(prCreateArgs, "--base", "main") {
 			t.Errorf("Expected --base main in gh pr create args, got: %v", prCreateArgs)
+		}
+		if !prAutoMerged {
+			t.Errorf("Expected gh pr merge to be called")
+		}
+		if !hasArg(prMergeArgs, "--delete-branch") {
+			t.Errorf("Expected --delete-branch in gh pr merge args, got: %v", prMergeArgs)
+		}
+	})
+
+	t.Run("governance_hub_skips_local_cloning_and_sync_pr", func(t *testing.T) {
+		var cloned, prCreated, remoteConfigured bool
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "repo" && args[2] == "clone" {
+				cloned = true
+				return "", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" {
+				prCreated = true
+				return "", "", 0, nil
+			}
+			if len(args) >= 2 && args[0] == "gh" && args[1] == "api" {
+				remoteConfigured = true
+				return "[]", "", 0, nil
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			Repos:    []string{"Cooper-Wallace/repokit", "test-user/repokit"},
+			CreatePR: true,
+		})
+		if err != nil {
+			t.Fatalf("ConfigureWithOptions for hub failed: %v", err)
+		}
+		if cloned {
+			t.Errorf("Expected governance hub to NOT be ephemerally cloned")
+		}
+		if prCreated {
+			t.Errorf("Expected governance hub to NOT create or merge sync PR")
+		}
+		if !remoteConfigured {
+			t.Errorf("Expected remote settings and rulesets to be applied for governance hub")
+		}
+	})
+
+	t.Run("profile_repo_exempt_from_branch_rulesets_and_scaffolding", func(t *testing.T) {
+		var apiCalled bool
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 2 && args[0] == "gh" && args[1] == "api" {
+				apiCalled = true
+			}
+			return "[]", "", 0, nil
+		}
+		err := ApplyBranchRuleset("Cooper-Wallace/Cooper-Wallace", "~DEFAULT_BRANCH", nil)
+		if err != nil {
+			t.Fatalf("ApplyBranchRuleset failed: %v", err)
+		}
+		if apiCalled {
+			t.Errorf("Expected ApplyBranchRuleset to skip API calls for profile repo")
 		}
 	})
 }

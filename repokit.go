@@ -648,9 +648,22 @@ func ApplyGitHubRepoSettings(repoSlug string) error {
 	return fmt.Errorf("gh api returned exit code %d: %s", code, stderr)
 }
 
+// IsProfileRepo returns true if the repository is a GitHub profile README repository
+// (<username>/<username>, e.g. Cooper-Wallace/Cooper-Wallace).
+func IsProfileRepo(slug string) bool {
+	parts := strings.Split(slug, "/")
+	if len(parts) == 2 && strings.TrimSpace(parts[0]) != "" {
+		return strings.EqualFold(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
+	}
+	return false
+}
+
 // IsVaultOrExemptRepo returns true if the repository name (after '/', case-insensitive)
-// is "agentvault" or "agent-vault".
+// is "agentvault" or "agent-vault", or if it is a GitHub profile repository (<username>/<username>).
 func IsVaultOrExemptRepo(slug string) bool {
+	if IsProfileRepo(slug) {
+		return true
+	}
 	repoName := slug
 	if idx := strings.LastIndex(slug, "/"); idx != -1 {
 		repoName = slug[idx+1:]
@@ -1645,7 +1658,7 @@ func configureSingleRepository(opts ConfigureOptions) error {
 							} else {
 								LogInfo("PR for %s already exists.", slug)
 							}
-							RunCmd([]string{"gh", "pr", "merge", "bot/repokit-sync", "--auto", "--squash", "--repo", slug}, repoRoot)
+							RunCmd([]string{"gh", "pr", "merge", "bot/repokit-sync", "--auto", "--squash", "--delete-branch", "--repo", slug}, repoRoot)
 							LogInfo("Enabled CI-gated auto-merge on bot/repokit-sync for %s", slug)
 						} else {
 							LogWarn("gh pr create for %s: %s", slug, strings.TrimSpace(prErr))
@@ -1816,6 +1829,12 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 			LogWarn("Failed to apply branch ruleset for %s: %v", slug, err)
 		}
 
+		isHub := strings.EqualFold(slug, DefaultGovernanceRepo) || strings.EqualFold(slug, "Cooper-Wallace/repokit") || strings.HasSuffix(strings.ToLower(slug), "/repokit")
+		if isHub {
+			LogInfo("Repository %s is the central governance hub; skipping downstream sync branch and PR creation.", slug)
+			continue
+		}
+
 		// Ephemeral clone for remote repos discovered without existing local clone
 		if localPath == "" {
 			tempDir := filepath.Join(os.TempDir(), "repokit-sync", repoName)
@@ -1904,7 +1923,7 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 						} else {
 							LogInfo("PR for %s already exists.", slug)
 						}
-						RunCmd([]string{"gh", "pr", "merge", "bot/repokit-sync", "--auto", "--squash", "--repo", slug}, localPath)
+						RunCmd([]string{"gh", "pr", "merge", "bot/repokit-sync", "--auto", "--squash", "--delete-branch", "--repo", slug}, localPath)
 						LogInfo("Enabled CI-gated auto-merge on bot/repokit-sync for %s", slug)
 					} else {
 						LogWarn("gh pr create for %s: %s", slug, strings.TrimSpace(prErr))
