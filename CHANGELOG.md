@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.2 (2026-11-06)
+
+### Bug Fixes
+
+* **propagation:** configure git author identity for automated sync PR commits (#22) (aae3f29)
+
 ## 1.1.1 (2026-11-06)
 
 ### Bug Fixes
