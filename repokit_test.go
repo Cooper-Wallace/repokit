@@ -2302,6 +2302,127 @@ func TestConfigureWithOptions(t *testing.T) {
 			t.Errorf("Expected 0 API calls for exempt vault repo in multiple repos, got %v", configuredSlugs)
 		}
 	})
+
+	t.Run("git_author_identity_configured_when_unset", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		repoA := filepath.Join(tmpDir, "repo-no-ident")
+		_ = os.MkdirAll(repoA, 0755)
+
+		cInit := exec.Command("git", "init", "-b", "main")
+		cInit.Dir = repoA
+		_ = cInit.Run()
+		cRemote := exec.Command("git", "remote", "add", "origin", "https://github.com/user/repo-no-ident.git")
+		cRemote.Dir = repoA
+		_ = cRemote.Run()
+		// Intentionally do NOT configure user.name and user.email in repoA
+
+		var setUserName, setUserEmail bool
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 6 && args[0] == "git" && args[3] == "config" {
+				if args[4] == "user.name" && args[5] == "github-actions[bot]" {
+					setUserName = true
+				}
+				if args[4] == "user.email" && args[5] == "41898282+github-actions[bot]@users.noreply.github.com" {
+					setUserEmail = true
+				}
+			}
+			if len(args) == 5 && args[0] == "git" && args[3] == "config" && args[4] == "user.name" {
+				return "", "", 0, nil
+			}
+			if len(args) > 0 && args[0] == "git" {
+				for i, a := range args {
+					if a == "checkout" && i+2 < len(args) && args[i+1] == "-B" {
+						return "", "", 0, nil
+					}
+					if a == "push" {
+						return "", "", 0, nil
+					}
+				}
+				return defaultCommandRunner(args, dir, input)
+			}
+			if len(args) > 1 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
+				return "https://github.com/user/repo-no-ident/pull/1", "", 0, nil
+			}
+			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
+				return "", "", 0, nil
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			Local:    true,
+			LocalDir: tmpDir,
+			CreatePR: true,
+		})
+		if err != nil {
+			t.Fatalf("ConfigureWithOptions failed: %v", err)
+		}
+		if !setUserName {
+			t.Errorf("Expected git user.name to be configured as github-actions[bot]")
+		}
+		if !setUserEmail {
+			t.Errorf("Expected git user.email to be configured as 41898282+github-actions[bot]@users.noreply.github.com")
+		}
+	})
+}
+
+func TestEnsureGitAuthorIdentity(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	t.Run("configures_identity_when_unset", func(t *testing.T) {
+		var executedCmds [][]string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			executedCmds = append(executedCmds, args)
+			if len(args) >= 5 && args[0] == "git" && args[3] == "config" && args[4] == "user.name" && len(args) == 5 {
+				return "", "", 0, nil
+			}
+			return "", "", 0, nil
+		}
+
+		ensureGitAuthorIdentity("/tmp/test-repo")
+
+		var setUserName, setUserEmail bool
+		for _, cmd := range executedCmds {
+			if len(cmd) == 6 && cmd[0] == "git" && cmd[1] == "-C" && cmd[2] == "/tmp/test-repo" && cmd[3] == "config" {
+				if cmd[4] == "user.name" && cmd[5] == "github-actions[bot]" {
+					setUserName = true
+				}
+				if cmd[4] == "user.email" && cmd[5] == "41898282+github-actions[bot]@users.noreply.github.com" {
+					setUserEmail = true
+				}
+			}
+		}
+
+		if !setUserName {
+			t.Errorf("Expected user.name to be set to github-actions[bot], executed commands: %v", executedCmds)
+		}
+		if !setUserEmail {
+			t.Errorf("Expected user.email to be set to 41898282+github-actions[bot]@users.noreply.github.com, executed commands: %v", executedCmds)
+		}
+	})
+
+	t.Run("preserves_existing_identity_when_configured", func(t *testing.T) {
+		var executedCmds [][]string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			executedCmds = append(executedCmds, args)
+			if len(args) >= 5 && args[0] == "git" && args[3] == "config" && args[4] == "user.name" && len(args) == 5 {
+				return "Existing User\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		}
+
+		ensureGitAuthorIdentity("/tmp/test-repo")
+
+		for _, cmd := range executedCmds {
+			if len(cmd) == 6 && cmd[0] == "git" && cmd[3] == "config" {
+				if cmd[4] == "user.name" || cmd[4] == "user.email" {
+					t.Errorf("Expected existing identity not to be overwritten, but got command: %v", cmd)
+				}
+			}
+		}
+	})
 }
 
 func TestPropagateRepositories(t *testing.T) {
