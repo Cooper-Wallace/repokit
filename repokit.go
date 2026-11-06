@@ -402,6 +402,16 @@ func GetGitHubUser() (string, error) {
 	return "", fmt.Errorf("failed to get authenticated GitHub user: %v: %s", err, stderr)
 }
 
+// ensureGitAuthorIdentity ensures git user.name and user.email are configured for the repository at localPath,
+// defaulting to github-actions[bot] identity if user.name is unset (e.g. in ephemeral CI environments).
+func ensureGitAuthorIdentity(localPath string) {
+	nameOut, _, _, _ := RunCmd([]string{"git", "-C", localPath, "config", "user.name"}, "")
+	if strings.TrimSpace(nameOut) == "" {
+		RunCmd([]string{"git", "-C", localPath, "config", "user.name", "github-actions[bot]"}, "")
+		RunCmd([]string{"git", "-C", localPath, "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"}, "")
+	}
+}
+
 // Archetype Management
 func GetAvailableTemplates() map[string]string {
 	return map[string]string{
@@ -1823,6 +1833,8 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 			if token != "" {
 				RunCmd([]string{"git", "-C", localPath, "remote", "set-url", "origin", fmt.Sprintf("https://x-access-token:%s@github.com/%s.git", token, slug)}, "")
 			}
+
+			ensureGitAuthorIdentity(localPath)
 
 			if err := ConfigureRepository(localPath, opts.Force); err != nil {
 				LogWarn("Failed to configure local repository at %s: %v", localPath, err)

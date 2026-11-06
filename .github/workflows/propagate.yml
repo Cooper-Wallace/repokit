@@ -56,6 +56,8 @@ jobs:
           fi
 
           gh auth setup-git
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           TARGETS="${{ inputs.target_repos }}"
           if [ -z "$TARGETS" ]; then
