@@ -19,7 +19,7 @@ on:
         description: "Commit directly to main without creating PR"
         required: false
         type: boolean
-        default: true
+        default: false
 
 jobs:
   propagate:
@@ -55,6 +55,8 @@ jobs:
             exit 0
           fi
 
+          gh auth setup-git
+
           TARGETS="${{ inputs.target_repos }}"
           if [ -z "$TARGETS" ]; then
             TARGETS="all"
@@ -73,14 +75,14 @@ jobs:
             ARGS="$ARGS --dry-run"
           fi
 
-          if [ "${{ inputs.direct_commit }}" = "true" ] || ([ "$GITHUB_EVENT_NAME" = "release" ] && [ "${{ inputs.dry_run }}" != "true" ]); then
+          if [ "${{ inputs.direct_commit }}" = "true" ]; then
             ARGS="$ARGS --direct --force"
             RELEASE_TAG="${{ github.event.release.tag_name }}"
             if [ -n "$RELEASE_TAG" ]; then
               ARGS="$ARGS --release-ref $RELEASE_TAG"
             fi
-          elif [ "${{ inputs.direct_commit }}" = "false" ]; then
-            ARGS="$ARGS --pr"
+          elif [ "${{ inputs.direct_commit }}" = "false" ] || [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            ARGS="$ARGS --pr --force"
           fi
 
           echo "Running: ./bin/repokit configure $ARGS"

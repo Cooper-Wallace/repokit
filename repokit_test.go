@@ -595,48 +595,83 @@ func TestApplyGitHubRepoSettings(t *testing.T) {
 	oldRunner := CommandRunner
 	defer func() { CommandRunner = oldRunner }()
 
-	var capturedInput string
-	var capturedArgs []string
+	t.Run("hub_repo_disables_auto_merge", func(t *testing.T) {
+		var capturedInput string
+		var capturedArgs []string
 
-	CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
-		capturedArgs = args
-		capturedInput = input
-		return "{}", "", 0, nil
-	}
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			capturedArgs = args
+			capturedInput = input
+			return "{}", "", 0, nil
+		}
 
-	err := ApplyGitHubRepoSettings("Cooper-Wallace/repokit")
-	if err != nil {
-		t.Fatalf("ApplyGitHubRepoSettings failed: %v", err)
-	}
+		err := ApplyGitHubRepoSettings("Cooper-Wallace/repokit")
+		if err != nil {
+			t.Fatalf("ApplyGitHubRepoSettings failed: %v", err)
+		}
 
-	expectedPrefix := []string{"gh", "api", "--method", "PATCH", "repos/Cooper-Wallace/repokit", "--input", "-"}
-	if len(capturedArgs) != len(expectedPrefix) {
-		t.Errorf("Expected args %v, got %v", expectedPrefix, capturedArgs)
-	}
+		expectedPrefix := []string{"gh", "api", "--method", "PATCH", "repos/Cooper-Wallace/repokit", "--input", "-"}
+		if len(capturedArgs) != len(expectedPrefix) {
+			t.Errorf("Expected args %v, got %v", expectedPrefix, capturedArgs)
+		}
 
-	var payload map[string]interface{}
-	if err := json.Unmarshal([]byte(capturedInput), &payload); err != nil {
-		t.Fatalf("Failed to unmarshal captured input: %v", err)
-	}
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(capturedInput), &payload); err != nil {
+			t.Fatalf("Failed to unmarshal captured input: %v", err)
+		}
 
-	if payload["allow_auto_merge"] != false {
-		t.Errorf("Expected allow_auto_merge to be false")
-	}
-	if payload["allow_squash_merge"] != true {
-		t.Errorf("Expected allow_squash_merge to be true")
-	}
-	if payload["allow_merge_commit"] != false {
-		t.Errorf("Expected allow_merge_commit to be false")
-	}
-	if payload["allow_rebase_merge"] != false {
-		t.Errorf("Expected allow_rebase_merge to be false")
-	}
-	if payload["squash_merge_commit_title"] != "PR_TITLE" {
-		t.Errorf("Expected PR_TITLE")
-	}
-	if payload["squash_merge_commit_message"] != "PR_BODY" {
-		t.Errorf("Expected PR_BODY")
-	}
+		if payload["allow_auto_merge"] != false {
+			t.Errorf("Expected allow_auto_merge to be false for hub repo")
+		}
+		if payload["allow_squash_merge"] != true {
+			t.Errorf("Expected allow_squash_merge to be true")
+		}
+		if payload["allow_merge_commit"] != false {
+			t.Errorf("Expected allow_merge_commit to be false")
+		}
+		if payload["allow_rebase_merge"] != false {
+			t.Errorf("Expected allow_rebase_merge to be false")
+		}
+		if payload["squash_merge_commit_title"] != "PR_TITLE" {
+			t.Errorf("Expected PR_TITLE")
+		}
+		if payload["squash_merge_commit_message"] != "PR_BODY" {
+			t.Errorf("Expected PR_BODY")
+		}
+	})
+
+	t.Run("consumer_repo_enables_auto_merge", func(t *testing.T) {
+		var capturedInput string
+		var capturedArgs []string
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			capturedArgs = args
+			capturedInput = input
+			return "{}", "", 0, nil
+		}
+
+		err := ApplyGitHubRepoSettings("Cooper-Wallace/my-repo")
+		if err != nil {
+			t.Fatalf("ApplyGitHubRepoSettings failed: %v", err)
+		}
+
+		expectedPrefix := []string{"gh", "api", "--method", "PATCH", "repos/Cooper-Wallace/my-repo", "--input", "-"}
+		if len(capturedArgs) != len(expectedPrefix) {
+			t.Errorf("Expected args %v, got %v", expectedPrefix, capturedArgs)
+		}
+
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(capturedInput), &payload); err != nil {
+			t.Fatalf("Failed to unmarshal captured input: %v", err)
+		}
+
+		if payload["allow_auto_merge"] != true {
+			t.Errorf("Expected allow_auto_merge to be true for consumer repo, got %v", payload["allow_auto_merge"])
+		}
+		if payload["allow_squash_merge"] != true {
+			t.Errorf("Expected allow_squash_merge to be true")
+		}
+	})
 }
 
 func TestApplyBranchRuleset(t *testing.T) {
@@ -741,12 +776,12 @@ func TestApplyBranchRuleset(t *testing.T) {
 				params := rMap["parameters"].(map[string]interface{})
 				checks := params["required_status_checks"].([]interface{})
 				c0 := checks[0].(map[string]interface{})
-				if c0["context"] != "Quality Gate / Verification" {
-					t.Errorf("Expected 'Quality Gate / Verification', got %v", c0["context"])
+				if c0["context"] != "ci / Quality Gate / Verification" {
+					t.Errorf("Expected 'ci / Quality Gate / Verification', got %v", c0["context"])
 				}
 				c1 := checks[1].(map[string]interface{})
-				if c1["context"] != "Quality Gate / Title Validation" {
-					t.Errorf("Expected 'Quality Gate / Title Validation', got %v", c1["context"])
+				if c1["context"] != "validate-pr / Quality Gate / Title Validation" {
+					t.Errorf("Expected 'validate-pr / Quality Gate / Title Validation', got %v", c1["context"])
 				}
 			}
 		}
@@ -910,6 +945,54 @@ func TestAuditRepositoryRemote(t *testing.T) {
 		}
 	})
 
+	t.Run("pass_prefixed_quality_gate", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit" {
+				data := map[string]interface{}{
+					"allow_squash_merge":          true,
+					"allow_merge_commit":          false,
+					"allow_rebase_merge":          false,
+					"delete_branch_on_merge":      true,
+					"squash_merge_commit_title":   "PR_TITLE",
+					"squash_merge_commit_message": "PR_BODY",
+					"allow_auto_merge":            false,
+				}
+				bytes, _ := json.Marshal(data)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/rulesets" {
+				rulesets := []map[string]interface{}{
+					{
+						"name":        "default-branch-protection",
+						"enforcement": "active",
+						"rules": []map[string]interface{}{
+							{
+								"type": "required_status_checks",
+								"parameters": map[string]interface{}{
+									"required_status_checks": []map[string]string{
+										{"context": "ci / Quality Gate / Verification"},
+										{"context": "validate-pr / Quality Gate / Title Validation"},
+									},
+								},
+							},
+						},
+					},
+				}
+				bytes, _ := json.Marshal(rulesets)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/actions/permissions/workflow" {
+				return `{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": true}`, "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		passed, err := AuditRepository(tmpDir, "", false, true)
+		if err != nil || !passed {
+			t.Errorf("Expected remote audit to pass with prefixed Quality Gate checks, got passed=%v, err=%v", passed, err)
+		}
+	})
+
 	t.Run("workflow_permissions_fails", func(t *testing.T) {
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit" {
@@ -978,6 +1061,61 @@ func TestAuditRepositoryRemote(t *testing.T) {
 		passed, _ := AuditRepository(tmpDir, "", false, true)
 		if passed {
 			t.Errorf("Expected remote audit to fail when allow_auto_merge is true")
+		}
+	})
+
+	t.Run("consumer_repo_auto_merge_passes", func(t *testing.T) {
+		consumerTmp := t.TempDir()
+		cInit := exec.Command("git", "init", "-b", "main")
+		cInit.Dir = consumerTmp
+		_ = cInit.Run()
+		cRemote := exec.Command("git", "remote", "add", "origin", "https://github.com/Cooper-Wallace/my-repo.git")
+		cRemote.Dir = consumerTmp
+		_ = cRemote.Run()
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/my-repo" {
+				data := map[string]interface{}{
+					"allow_squash_merge":          true,
+					"allow_merge_commit":          false,
+					"allow_rebase_merge":          false,
+					"delete_branch_on_merge":      true,
+					"squash_merge_commit_title":   "PR_TITLE",
+					"squash_merge_commit_message": "PR_BODY",
+					"allow_auto_merge":            true,
+				}
+				bytes, _ := json.Marshal(data)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/my-repo/rulesets" {
+				rulesets := []map[string]interface{}{
+					{
+						"name":        "default-branch-protection",
+						"enforcement": "active",
+						"rules": []map[string]interface{}{
+							{
+								"type": "required_status_checks",
+								"parameters": map[string]interface{}{
+									"required_status_checks": []map[string]string{
+										{"context": "Quality Gate / Verification"},
+									},
+								},
+							},
+						},
+					},
+				}
+				bytes, _ := json.Marshal(rulesets)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/my-repo/actions/permissions/workflow" {
+				return `{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": true}`, "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		passed, err := AuditRepository(consumerTmp, "", false, true)
+		if err != nil || !passed {
+			t.Errorf("Expected consumer repo remote audit to pass with allow_auto_merge=true, got passed=%v, err=%v", passed, err)
 		}
 	})
 }
@@ -1746,7 +1884,7 @@ func TestRulesetIDFormatting(t *testing.T) {
 		var detailQueriedURL string
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			if len(args) > 2 && args[2] == "repos/org/repo" {
-				return `{"allow_squash_merge": true, "allow_merge_commit": false, "allow_rebase_merge": false, "delete_branch_on_merge": true, "squash_merge_commit_title": "PR_TITLE", "squash_merge_commit_message": "PR_BODY", "allow_auto_merge": false}`, "", 0, nil
+				return `{"allow_squash_merge": true, "allow_merge_commit": false, "allow_rebase_merge": false, "delete_branch_on_merge": true, "squash_merge_commit_title": "PR_TITLE", "squash_merge_commit_message": "PR_BODY", "allow_auto_merge": true}`, "", 0, nil
 			}
 			if len(args) > 2 && args[2] == "repos/org/repo/rulesets" {
 				return `[{"id": 22459068, "name": "default-branch-protection", "enforcement": "active"}]`, "", 0, nil
@@ -1861,6 +1999,7 @@ func TestConfigureWithOptions(t *testing.T) {
 	})
 
 	t.Run("local_discovery_and_pr_creation", func(t *testing.T) {
+		t.Setenv("GH_PAT", "ghp_test_token_123")
 		tmpDir := t.TempDir()
 		repoA := filepath.Join(tmpDir, "repo-local")
 		_ = os.MkdirAll(repoA, 0755)
@@ -1881,10 +2020,16 @@ func TestConfigureWithOptions(t *testing.T) {
 		var gitCheckoutBranch string
 		var gitPushed bool
 		var prCreated bool
+		var prAutoMerged bool
+		var gitRemoteSetURL bool
 
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			if len(args) > 0 && args[0] == "git" {
 				for i, a := range args {
+					if a == "set-url" && i+2 < len(args) && strings.Contains(args[i+2], "x-access-token:ghp_test_token_123") {
+						gitRemoteSetURL = true
+						return "", "", 0, nil
+					}
 					if a == "checkout" && i+2 < len(args) && args[i+1] == "-B" {
 						gitCheckoutBranch = args[i+2]
 						return "", "", 0, nil
@@ -1900,6 +2045,10 @@ func TestConfigureWithOptions(t *testing.T) {
 				prCreated = true
 				return "https://github.com/user/repo-local/pull/1", "", 0, nil
 			}
+			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
+				prAutoMerged = true
+				return "", "", 0, nil
+			}
 			return "{}", "", 0, nil
 		}
 
@@ -1911,6 +2060,9 @@ func TestConfigureWithOptions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ConfigureWithOptions local failed: %v", err)
 		}
+		if !gitRemoteSetURL {
+			t.Errorf("Expected git remote set-url to be called with authenticated URL")
+		}
 		if gitCheckoutBranch != "chore/repokit-sync" {
 			t.Errorf("Expected checkout of chore/repokit-sync, got %q", gitCheckoutBranch)
 		}
@@ -1919,6 +2071,64 @@ func TestConfigureWithOptions(t *testing.T) {
 		}
 		if !prCreated {
 			t.Errorf("Expected gh pr create to be called")
+		}
+		if !prAutoMerged {
+			t.Errorf("Expected gh pr merge ... --auto --squash to be called")
+		}
+	})
+
+	t.Run("local_discovery_and_pr_creation_existing_pr", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		repoA := filepath.Join(tmpDir, "repo-local-exist")
+		_ = os.MkdirAll(repoA, 0755)
+
+		cInit := exec.Command("git", "init", "-b", "main")
+		cInit.Dir = repoA
+		_ = cInit.Run()
+		cRemote := exec.Command("git", "remote", "add", "origin", "https://github.com/user/repo-local-exist.git")
+		cRemote.Dir = repoA
+		_ = cRemote.Run()
+		cConfigU := exec.Command("git", "config", "user.name", "Test")
+		cConfigU.Dir = repoA
+		_ = cConfigU.Run()
+		cConfigE := exec.Command("git", "config", "user.email", "test@test.com")
+		cConfigE.Dir = repoA
+		_ = cConfigE.Run()
+
+		var prAutoMergedExisting bool
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 0 && args[0] == "git" {
+				for i, a := range args {
+					if a == "checkout" && i+2 < len(args) && args[i+1] == "-B" {
+						return "", "", 0, nil
+					}
+					if a == "push" {
+						return "", "", 0, nil
+					}
+				}
+				return defaultCommandRunner(args, dir, input)
+			}
+			if len(args) > 1 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
+				return "", "a pull request for branch \"chore/repokit-sync\" into branch \"main\" already exists", 1, nil
+			}
+			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
+				prAutoMergedExisting = true
+				return "", "", 0, nil
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			Local:    true,
+			LocalDir: tmpDir,
+			CreatePR: true,
+		})
+		if err != nil {
+			t.Fatalf("ConfigureWithOptions local failed: %v", err)
+		}
+		if !prAutoMergedExisting {
+			t.Errorf("Expected gh pr merge --auto --squash to be called when PR already exists")
 		}
 	})
 
@@ -2601,8 +2811,8 @@ func TestExecuteRelease(t *testing.T) {
 				foundStatusCert++
 			}
 		}
-		if foundStatusCert != 6 {
-			t.Errorf("Expected 6 pre-certified status check calls, got %d", foundStatusCert)
+		if foundStatusCert != 8 {
+			t.Errorf("Expected 8 pre-certified status check calls, got %d", foundStatusCert)
 		}
 	})
 
@@ -2672,8 +2882,8 @@ func TestExecuteRelease(t *testing.T) {
 		if !foundPrEdit {
 			t.Errorf("Expected gh pr edit 55")
 		}
-		if foundStatusCertExisting != 6 {
-			t.Errorf("Expected 6 pre-certified status check calls, got %d", foundStatusCertExisting)
+		if foundStatusCertExisting != 8 {
+			t.Errorf("Expected 8 pre-certified status check calls, got %d", foundStatusCertExisting)
 		}
 	})
 
