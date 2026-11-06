@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Cooper-Wallace/repokit"
 )
 
-const version = "1.0.0"
+var version = repokit.Version
 
 func printHelp() {
 	fmt.Printf(`repokit %s - Automate GitHub repository DevOps and Git hygiene standards.
@@ -22,10 +23,10 @@ Commands:
   create <name> [-d/--description] [-t/--type <python|java|typescript|bash|go>] [--public] [--path <dir>]
       Create a new standardized GitHub repository with automated DevOps scaffolding.
 
-  configure [path] [-f/--force] [--all] [--repos <r1,r2>] [--dry-run] [--pr] [--direct] [--release-ref <tag>] [--wait-for-merge] [--merge-timeout <dur>]
+  configure [path] [-f/--force] [--all] [--repos <r1,r2>] [--dry-run] [--pr] [--direct] [--release-ref <tag>] [--wait-for-merge] [--merge-timeout <dur>] [--concurrency <N>] [--offline]
       Apply DevOps standards, branch rulesets, hooks, and CI workflows to an existing repo (or across --all).
 
-  audit [path] [-t/--type <python|java|typescript|bash|go>] [--local] [--remote]
+  audit [path] [-t/--type <python|java|typescript|bash|go>] [--local] [--remote] [--offline]
       Audit repository compliance against remote GitHub settings and local standards.
 
   templates
@@ -36,6 +37,9 @@ Commands:
 
   release [path] [--dry-run] [--target-branch <main>] [--staging-branch <release-staging>]
       Stage a release PR (on release-staging) or promote/tag a release if HEAD is a release commit.
+
+  update [--check] [--force] [--dry-run]
+      Inspect and update repokit to the latest release from GitHub.
 
   version, -v, --version
       Print repokit version.
@@ -167,13 +171,26 @@ func run(args []string) int {
 						}
 					}
 				}
+			case "--concurrency":
+				if i+1 < len(cmdArgs) {
+					i++
+					if c, err := strconv.Atoi(cmdArgs[i]); err == nil {
+						opts.Concurrency = c
+					}
+				}
+			case "--offline":
+				opts.Offline = true
 			case "--path":
 				if i+1 < len(cmdArgs) {
 					i++
 					path = cmdArgs[i]
 				}
 			default:
-				if strings.HasPrefix(arg, "--merge-timeout=") {
+				if strings.HasPrefix(arg, "--concurrency=") {
+					if c, err := strconv.Atoi(strings.TrimPrefix(arg, "--concurrency=")); err == nil {
+						opts.Concurrency = c
+					}
+				} else if strings.HasPrefix(arg, "--merge-timeout=") {
 					if d, err := time.ParseDuration(strings.TrimPrefix(arg, "--merge-timeout=")); err == nil {
 						opts.MergeTimeout = d
 					}
@@ -205,7 +222,7 @@ func run(args []string) int {
 
 	case "audit":
 		var path, templateType string
-		var localOnly, remoteOnly bool
+		var localOnly, remoteOnly, offline bool
 
 		for i := 0; i < len(cmdArgs); i++ {
 			arg := cmdArgs[i]
@@ -214,6 +231,8 @@ func run(args []string) int {
 				localOnly = true
 			case "--remote":
 				remoteOnly = true
+			case "--offline":
+				offline = true
 			case "-t", "--type":
 				if i+1 < len(cmdArgs) {
 					i++
@@ -236,7 +255,7 @@ func run(args []string) int {
 			return 1
 		}
 
-		if passed, err := repokit.AuditRepository(repoRoot, templateType, localOnly, remoteOnly); err != nil || !passed {
+		if passed, err := repokit.AuditRepository(repoRoot, templateType, localOnly, remoteOnly, offline); err != nil || !passed {
 			return 1
 		}
 		return 0
@@ -328,6 +347,70 @@ func run(args []string) int {
 		} else {
 			repokit.LogInfo("No release needed.")
 		}
+		return 0
+
+	case "update":
+		var checkOnly, force, dryRun bool
+		for i := 0; i < len(cmdArgs); i++ {
+			arg := cmdArgs[i]
+			switch arg {
+			case "--check":
+				checkOnly = true
+			case "--force":
+				force = true
+			case "--dry-run":
+				dryRun = true
+			case "-h", "--help":
+				fmt.Printf(`repokit update - Inspect and update repokit to the latest release.
+
+Usage:
+  repokit update [--check] [--force] [--dry-run]
+
+Flags:
+  --check    Inspect if a newer version is available without downloading or replacing.
+  --force    Download and reinstall even if already on the latest version.
+  --dry-run  Simulate the update process without writing files.
+  -h, --help Show this help message.
+`)
+				return 0
+			default:
+				repokit.LogError("Unknown flag for update: %s", arg)
+				return 1
+			}
+		}
+
+		opts := repokit.UpdateOptions{
+			CheckOnly: checkOnly,
+			Force:     force,
+			DryRun:    dryRun,
+		}
+
+		info, err := repokit.ExecuteSelfUpdate(opts)
+		if err != nil {
+			repokit.LogError("Update failed: %v", err)
+			return 1
+		}
+
+		if checkOnly {
+			if info.UpdateAvailable {
+				repokit.LogInfo("A newer version of repokit is available: %s -> %s", info.CurrentVersion, info.LatestVersion)
+				repokit.LogInfo("Run 'repokit update' to upgrade.")
+			} else {
+				repokit.LogSuccess("repokit is up to date (version %s).", info.CurrentVersion)
+			}
+			return 0
+		}
+
+		if dryRun {
+			return 0
+		}
+
+		if !info.UpdateAvailable && !force {
+			repokit.LogSuccess("repokit is already up to date (version %s).", info.CurrentVersion)
+			return 0
+		}
+
+		repokit.LogSuccess("repokit updated successfully to version %s!", info.LatestVersion)
 		return 0
 
 	default:
