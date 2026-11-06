@@ -162,7 +162,7 @@ Options:
 - `--dry-run`: Inspect actions and changes that would be applied without modifying remote settings or local files.
 - `--direct`, `--push-main`: Commit changes directly to `main` via ephemeral clones and bypass ruleset push restrictions (using administrative tokens), avoiding PR merge fatigue across downstream repositories.
 - `--release-ref <tag>`: Associate direct governance commits with a specific release tag (e.g. `v1.2.0`) in the commit message (`chore(repokit): sync governance standards and workflows to <tag>`).
-- `--pr`: Create a pull request on branch `chore/repokit-sync` instead of pushing directly to `main`.
+- `--pr`: Create a pull request on branch `bot/repokit-sync` instead of pushing directly to `main`.
 ```
 
 ---
