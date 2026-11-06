@@ -65,24 +65,24 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             
-            git checkout -b chore/repokit-sync
+            git checkout -b bot/repokit-sync
             git add -A
             
             # Detach any unstaged changes or untracked non-governance files if needed
-            git commit -m "chore(repokit): update governance standards and workflows" || echo "No commit needed"
-            git push origin chore/repokit-sync --force || echo "Push failed or unauthorized"
+            git commit -m "ci(repokit): automated sync of governance standards and workflows" || echo "No commit needed"
+            git push origin bot/repokit-sync --force || echo "Push failed or unauthorized"
 
             MODIFIED_FILES=$(git diff --name-only HEAD~1 HEAD || git status --porcelain)
             BODY_TEXT="Automated governance synchronization from \`${{ inputs.governance-repo }}\` (@ \`${{ inputs.branch }}\`).\n\n### Updated Files:\n\`\`\`text\n${MODIFIED_FILES}\n\`\`\`"
 
-            if gh pr view chore/repokit-sync >/dev/null 2>&1; then
-              echo "Pull request already exists for chore/repokit-sync."
+            if gh pr view bot/repokit-sync >/dev/null 2>&1; then
+              echo "Pull request already exists for bot/repokit-sync."
             else
               gh pr create \
-                --title "chore(repokit): update governance standards and workflows" \
+                --title "ci(repokit): automated sync of governance standards and workflows" \
                 --body "$BODY_TEXT" \
                 --base main \
-                --head chore/repokit-sync || echo "PR creation failed"
+                --head bot/repokit-sync || echo "PR creation failed"
             fi
           else
             echo "No changes detected. Repository is fully up to date with governance standards."

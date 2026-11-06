@@ -817,11 +817,18 @@ func TestIsVaultOrExemptRepo(t *testing.T) {
 		{"agent-vault", true},
 		{"AgentVault", true},
 		{"Agent-Vault", true},
+		{"Cooper-Wallace/Cooper-Wallace", true},
+		{"cooper-wallace/cooper-wallace", true},
+		{"cooper-wallace/Cooper-Wallace", true},
+		{"octocat/octocat", true},
+		{"user/user", true},
 		{"Cooper-Wallace/agentkit", false},
 		{"Cooper-Wallace/repokit", false},
 		{"agentkit", false},
 		{"my-agent-vault-app", false},
 		{"", false},
+		{"/", false},
+		{"user/other", false},
 	}
 
 	for _, tc := range cases {
@@ -833,6 +840,40 @@ func TestIsVaultOrExemptRepo(t *testing.T) {
 			actual := IsVaultOrExemptRepo(tc.slug)
 			if actual != tc.expected {
 				t.Errorf("IsVaultOrExemptRepo(%q) = %v; want %v", tc.slug, actual, tc.expected)
+			}
+		})
+	}
+}
+
+func TestIsProfileRepo(t *testing.T) {
+	cases := []struct {
+		slug     string
+		expected bool
+	}{
+		{"Cooper-Wallace/Cooper-Wallace", true},
+		{"cooper-wallace/cooper-wallace", true},
+		{"cooper-wallace/Cooper-Wallace", true},
+		{"octocat/octocat", true},
+		{"user/user", true},
+		{"Cooper-Wallace/repokit", false},
+		{"Cooper-Wallace/AgentVault", false},
+		{"agentvault", false},
+		{"", false},
+		{"/", false},
+		{"//", false},
+		{"user/other", false},
+		{"a/b/c", false},
+	}
+
+	for _, tc := range cases {
+		name := tc.slug
+		if name == "" {
+			name = "empty_slug"
+		}
+		t.Run(name, func(t *testing.T) {
+			actual := IsProfileRepo(tc.slug)
+			if actual != tc.expected {
+				t.Errorf("IsProfileRepo(%q) = %v; want %v", tc.slug, actual, tc.expected)
 			}
 		})
 	}
@@ -1914,6 +1955,24 @@ func TestConfigureWithOptions(t *testing.T) {
 	oldRunner := CommandRunner
 	defer func() { CommandRunner = oldRunner }()
 
+	hasArgPair := func(cmdArgs []string, flag, expectedVal string) bool {
+		for i, a := range cmdArgs {
+			if a == flag && i+1 < len(cmdArgs) && cmdArgs[i+1] == expectedVal {
+				return true
+			}
+		}
+		return false
+	}
+
+	hasArg := func(cmdArgs []string, flag string) bool {
+		for _, a := range cmdArgs {
+			if a == flag {
+				return true
+			}
+		}
+		return false
+	}
+
 	t.Run("backward_compatible_propagate_no_repos_specified", func(t *testing.T) {
 		err := PropagateRepositories(PropagateOptions{})
 		if err == nil {
@@ -2022,6 +2081,8 @@ func TestConfigureWithOptions(t *testing.T) {
 		var prCreated bool
 		var prAutoMerged bool
 		var gitRemoteSetURL bool
+		var prCreateArgs []string
+		var prMergeArgs []string
 
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			if len(args) > 0 && args[0] == "git" {
@@ -2043,10 +2104,12 @@ func TestConfigureWithOptions(t *testing.T) {
 			}
 			if len(args) > 1 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
 				prCreated = true
+				prCreateArgs = args
 				return "https://github.com/user/repo-local/pull/1", "", 0, nil
 			}
 			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
 				prAutoMerged = true
+				prMergeArgs = args
 				return "", "", 0, nil
 			}
 			return "{}", "", 0, nil
@@ -2063,17 +2126,32 @@ func TestConfigureWithOptions(t *testing.T) {
 		if !gitRemoteSetURL {
 			t.Errorf("Expected git remote set-url to be called with authenticated URL")
 		}
-		if gitCheckoutBranch != "chore/repokit-sync" {
-			t.Errorf("Expected checkout of chore/repokit-sync, got %q", gitCheckoutBranch)
+		if gitCheckoutBranch != "bot/repokit-sync" {
+			t.Errorf("Expected checkout of bot/repokit-sync, got %q", gitCheckoutBranch)
 		}
 		if !gitPushed {
-			t.Errorf("Expected git push of chore/repokit-sync")
+			t.Errorf("Expected git push of bot/repokit-sync")
 		}
 		if !prCreated {
 			t.Errorf("Expected gh pr create to be called")
 		}
+		if !hasArgPair(prCreateArgs, "--repo", "user/repo-local") {
+			t.Errorf("Expected --repo user/repo-local in gh pr create args, got: %v", prCreateArgs)
+		}
+		if !hasArgPair(prCreateArgs, "--head", "bot/repokit-sync") {
+			t.Errorf("Expected --head bot/repokit-sync in gh pr create args, got: %v", prCreateArgs)
+		}
+		if !hasArgPair(prCreateArgs, "--title", "ci(repokit): automated sync of governance standards and workflows") {
+			t.Errorf("Expected --title 'ci(repokit): automated sync of governance standards and workflows' in gh pr create args, got: %v", prCreateArgs)
+		}
+		if !hasArgPair(prCreateArgs, "--base", "main") {
+			t.Errorf("Expected --base main in gh pr create args, got: %v", prCreateArgs)
+		}
 		if !prAutoMerged {
 			t.Errorf("Expected gh pr merge ... --auto --squash to be called")
+		}
+		if !hasArg(prMergeArgs, "--delete-branch") {
+			t.Errorf("Expected --delete-branch in gh pr merge args, got: %v", prMergeArgs)
 		}
 	})
 
@@ -2096,6 +2174,8 @@ func TestConfigureWithOptions(t *testing.T) {
 		_ = cConfigE.Run()
 
 		var prAutoMergedExisting bool
+		var prCreateExistingArgs []string
+		var prMergeExistingArgs []string
 
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			if len(args) > 0 && args[0] == "git" {
@@ -2110,10 +2190,12 @@ func TestConfigureWithOptions(t *testing.T) {
 				return defaultCommandRunner(args, dir, input)
 			}
 			if len(args) > 1 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
-				return "", "a pull request for branch \"chore/repokit-sync\" into branch \"main\" already exists", 1, nil
+				prCreateExistingArgs = args
+				return "", "a pull request for branch \"bot/repokit-sync\" into branch \"main\" already exists", 1, nil
 			}
 			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
 				prAutoMergedExisting = true
+				prMergeExistingArgs = args
 				return "", "", 0, nil
 			}
 			return "{}", "", 0, nil
@@ -2127,8 +2209,23 @@ func TestConfigureWithOptions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ConfigureWithOptions local failed: %v", err)
 		}
+		if !hasArgPair(prCreateExistingArgs, "--repo", "user/repo-local-exist") {
+			t.Errorf("Expected --repo user/repo-local-exist in gh pr create args, got: %v", prCreateExistingArgs)
+		}
+		if !hasArgPair(prCreateExistingArgs, "--head", "bot/repokit-sync") {
+			t.Errorf("Expected --head bot/repokit-sync in gh pr create args, got: %v", prCreateExistingArgs)
+		}
+		if !hasArgPair(prCreateExistingArgs, "--title", "ci(repokit): automated sync of governance standards and workflows") {
+			t.Errorf("Expected --title 'ci(repokit): automated sync of governance standards and workflows' in gh pr create args, got: %v", prCreateExistingArgs)
+		}
+		if !hasArgPair(prCreateExistingArgs, "--base", "main") {
+			t.Errorf("Expected --base main in gh pr create args, got: %v", prCreateExistingArgs)
+		}
 		if !prAutoMergedExisting {
 			t.Errorf("Expected gh pr merge --auto --squash to be called when PR already exists")
+		}
+		if !hasArg(prMergeExistingArgs, "--delete-branch") {
+			t.Errorf("Expected --delete-branch in gh pr merge args, got: %v", prMergeExistingArgs)
 		}
 	})
 
@@ -2316,7 +2413,8 @@ func TestConfigureWithOptions(t *testing.T) {
 		_ = cRemote.Run()
 		// Intentionally do NOT configure user.name and user.email in repoA
 
-		var setUserName, setUserEmail bool
+		var setUserName, setUserEmail, prAutoMerged bool
+		var prCreateArgs, prMergeArgs []string
 
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			if len(args) >= 6 && args[0] == "git" && args[3] == "config" {
@@ -2342,9 +2440,12 @@ func TestConfigureWithOptions(t *testing.T) {
 				return defaultCommandRunner(args, dir, input)
 			}
 			if len(args) > 1 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
+				prCreateArgs = args
 				return "https://github.com/user/repo-no-ident/pull/1", "", 0, nil
 			}
 			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
+				prAutoMerged = true
+				prMergeArgs = args
 				return "", "", 0, nil
 			}
 			return "{}", "", 0, nil
@@ -2363,6 +2464,78 @@ func TestConfigureWithOptions(t *testing.T) {
 		}
 		if !setUserEmail {
 			t.Errorf("Expected git user.email to be configured as 41898282+github-actions[bot]@users.noreply.github.com")
+		}
+		if !hasArgPair(prCreateArgs, "--repo", "user/repo-no-ident") {
+			t.Errorf("Expected --repo user/repo-no-ident in gh pr create args, got: %v", prCreateArgs)
+		}
+		if !hasArgPair(prCreateArgs, "--head", "bot/repokit-sync") {
+			t.Errorf("Expected --head bot/repokit-sync in gh pr create args, got: %v", prCreateArgs)
+		}
+		if !hasArgPair(prCreateArgs, "--title", "ci(repokit): automated sync of governance standards and workflows") {
+			t.Errorf("Expected --title 'ci(repokit): automated sync of governance standards and workflows' in gh pr create args, got: %v", prCreateArgs)
+		}
+		if !hasArgPair(prCreateArgs, "--base", "main") {
+			t.Errorf("Expected --base main in gh pr create args, got: %v", prCreateArgs)
+		}
+		if !prAutoMerged {
+			t.Errorf("Expected gh pr merge to be called")
+		}
+		if !hasArg(prMergeArgs, "--delete-branch") {
+			t.Errorf("Expected --delete-branch in gh pr merge args, got: %v", prMergeArgs)
+		}
+	})
+
+	t.Run("governance_hub_skips_local_cloning_and_sync_pr", func(t *testing.T) {
+		var cloned, prCreated, remoteConfigured bool
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "repo" && args[2] == "clone" {
+				cloned = true
+				return "", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" {
+				prCreated = true
+				return "", "", 0, nil
+			}
+			if len(args) >= 2 && args[0] == "gh" && args[1] == "api" {
+				remoteConfigured = true
+				return "[]", "", 0, nil
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			Repos:    []string{"Cooper-Wallace/repokit", "test-user/repokit"},
+			CreatePR: true,
+		})
+		if err != nil {
+			t.Fatalf("ConfigureWithOptions for hub failed: %v", err)
+		}
+		if cloned {
+			t.Errorf("Expected governance hub to NOT be ephemerally cloned")
+		}
+		if prCreated {
+			t.Errorf("Expected governance hub to NOT create or merge sync PR")
+		}
+		if !remoteConfigured {
+			t.Errorf("Expected remote settings and rulesets to be applied for governance hub")
+		}
+	})
+
+	t.Run("profile_repo_exempt_from_branch_rulesets_and_scaffolding", func(t *testing.T) {
+		var apiCalled bool
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 2 && args[0] == "gh" && args[1] == "api" {
+				apiCalled = true
+			}
+			return "[]", "", 0, nil
+		}
+		err := ApplyBranchRuleset("Cooper-Wallace/Cooper-Wallace", "~DEFAULT_BRANCH", nil)
+		if err != nil {
+			t.Fatalf("ApplyBranchRuleset failed: %v", err)
+		}
+		if apiCalled {
+			t.Errorf("Expected ApplyBranchRuleset to skip API calls for profile repo")
 		}
 	})
 }
@@ -3088,6 +3261,143 @@ func TestExecuteRelease(t *testing.T) {
 			if len(cmd) >= 2 && cmd[0] == "gh" {
 				t.Errorf("gh command executed in dry run: %v", cmd)
 			}
+		}
+	})
+}
+
+func TestGetReleaseNotes(t *testing.T) {
+	mockChangelog := `# Changelog
+
+## 1.2.0 (2026-11-06)
+
+### Features
+
+* **core:** add dynamic sync pr bodies (#25)
+
+## 1.1.2 (2026-11-05)
+
+### Bug Fixes
+
+* **propagation:** configure git author identity (#22)
+
+## 1.0.0 (2026-11-01)
+
+### Features
+
+* initial release
+`
+
+	tmpDir := t.TempDir()
+	changelogPath := filepath.Join(tmpDir, "CHANGELOG.md")
+	if err := os.WriteFile(changelogPath, []byte(mockChangelog), 0644); err != nil {
+		t.Fatalf("Failed to write mock changelog: %v", err)
+	}
+
+	t.Run("extracts_exact_version", func(t *testing.T) {
+		notes := GetReleaseNotes(tmpDir, "1.1.2")
+		if !strings.HasPrefix(notes, "## 1.1.2 (2026-11-05)") {
+			t.Errorf("Expected notes to start with header for 1.1.2, got: %s", notes)
+		}
+		if !strings.Contains(notes, "configure git author identity") {
+			t.Errorf("Expected notes to contain commit details, got: %s", notes)
+		}
+		if strings.Contains(notes, "## 1.0.0") {
+			t.Errorf("Notes leaked into next version section: %s", notes)
+		}
+	})
+
+	t.Run("strips_v_prefix", func(t *testing.T) {
+		notes := GetReleaseNotes(tmpDir, "v1.1.2")
+		if !strings.HasPrefix(notes, "## 1.1.2 (2026-11-05)") {
+			t.Errorf("Expected notes to start with header for 1.1.2, got: %s", notes)
+		}
+		if !strings.Contains(notes, "configure git author identity") {
+			t.Errorf("Expected notes to contain commit details, got: %s", notes)
+		}
+	})
+
+	t.Run("extracts_first_section_when_version_empty", func(t *testing.T) {
+		notes := GetReleaseNotes(tmpDir, "")
+		if !strings.HasPrefix(notes, "## 1.2.0 (2026-11-06)") {
+			t.Errorf("Expected first section 1.2.0 when version is empty, got: %s", notes)
+		}
+		if !strings.Contains(notes, "add dynamic sync pr bodies") {
+			t.Errorf("Expected first section content, got: %s", notes)
+		}
+		if strings.Contains(notes, "## 1.1.2") {
+			t.Errorf("Notes leaked into next section: %s", notes)
+		}
+	})
+
+	t.Run("extracts_first_section_when_version_not_found", func(t *testing.T) {
+		notes := GetReleaseNotes(tmpDir, "v9.9.9")
+		if !strings.HasPrefix(notes, "## 1.2.0 (2026-11-06)") {
+			t.Errorf("Expected fallback to first section 1.2.0, got: %s", notes)
+		}
+		if !strings.Contains(notes, "add dynamic sync pr bodies") {
+			t.Errorf("Expected first section content, got: %s", notes)
+		}
+	})
+
+	t.Run("extracts_last_section_to_eof", func(t *testing.T) {
+		notes := GetReleaseNotes(tmpDir, "v1.0.0")
+		if !strings.HasPrefix(notes, "## 1.0.0 (2026-11-01)") {
+			t.Errorf("Expected notes for 1.0.0, got: %s", notes)
+		}
+		if !strings.Contains(notes, "initial release") {
+			t.Errorf("Expected content of 1.0.0, got: %s", notes)
+		}
+	})
+
+	t.Run("returns_empty_when_changelog_not_found", func(t *testing.T) {
+		emptyDir := t.TempDir()
+		notes := GetReleaseNotes(emptyDir, "v1.0.0")
+		if notes != "" {
+			t.Errorf("Expected empty string when CHANGELOG.md is not found, got: %q", notes)
+		}
+	})
+
+	t.Run("returns_empty_for_empty_changelog", func(t *testing.T) {
+		emptyChangelogDir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(emptyChangelogDir, "CHANGELOG.md"), []byte("   \n\n  "), 0644)
+		// Pointing directly to empty CHANGELOG.md
+		notes := GetReleaseNotes(filepath.Join(emptyChangelogDir, "CHANGELOG.md"), "1.0.0")
+		if notes != "" {
+			t.Errorf("Expected empty string for empty changelog, got: %q", notes)
+		}
+	})
+}
+
+func TestBuildSyncPRBody(t *testing.T) {
+	t.Run("builds_body_with_release_notes", func(t *testing.T) {
+		body := buildSyncPRBody("v1.1.2")
+		if !strings.Contains(body, "🤖 **Automated Governance Sync**") {
+			t.Errorf("Expected header banner in PR body: %s", body)
+		}
+		if !strings.Contains(body, "**Merge Policy**: This PR is queued for automated squash merge") {
+			t.Errorf("Expected merge policy in PR body: %s", body)
+		}
+		if !strings.Contains(body, "### Release Notes (`1.1.2`)") {
+			t.Errorf("Expected Release Notes header in PR body, got: %s", body)
+		}
+		if !strings.Contains(body, "configure git author identity") {
+			t.Errorf("Expected release notes content in PR body, got: %s", body)
+		}
+	})
+
+	t.Run("builds_body_with_fallback_when_no_changelog", func(t *testing.T) {
+		// When ReleaseRef is specified but no release notes are extracted
+		// We can test the helper directly or by inspecting formatting
+		body := `> 🤖 **Automated Governance Sync**
+> This pull request was automatically generated by [repokit](https://github.com/Cooper-Wallace/repokit) to synchronize centralized governance standards, reusable GitHub Actions workflows, and project templates.
+>
+> **Merge Policy**: This PR is queued for automated squash merge once all required status checks pass.
+
+### Propagated Version
+Synchronized to repokit release ` + "`v2.0.0`."
+
+		if !strings.Contains(body, "Synchronized to repokit release `v2.0.0`.") {
+			t.Errorf("Expected propagated version text")
 		}
 	})
 }

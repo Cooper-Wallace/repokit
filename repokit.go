@@ -648,9 +648,22 @@ func ApplyGitHubRepoSettings(repoSlug string) error {
 	return fmt.Errorf("gh api returned exit code %d: %s", code, stderr)
 }
 
+// IsProfileRepo returns true if the repository is a GitHub profile README repository
+// (<username>/<username>, e.g. Cooper-Wallace/Cooper-Wallace).
+func IsProfileRepo(slug string) bool {
+	parts := strings.Split(slug, "/")
+	if len(parts) == 2 && strings.TrimSpace(parts[0]) != "" {
+		return strings.EqualFold(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
+	}
+	return false
+}
+
 // IsVaultOrExemptRepo returns true if the repository name (after '/', case-insensitive)
-// is "agentvault" or "agent-vault".
+// is "agentvault" or "agent-vault", or if it is a GitHub profile repository (<username>/<username>).
 func IsVaultOrExemptRepo(slug string) bool {
+	if IsProfileRepo(slug) {
+		return true
+	}
 	repoName := slug
 	if idx := strings.LastIndex(slug, "/"); idx != -1 {
 		repoName = slug[idx+1:]
@@ -1573,7 +1586,7 @@ func configureSingleRepository(opts ConfigureOptions) error {
 		if opts.DirectCommit {
 			LogInfo("[DRY RUN] Would check git status and commit directly to main at %s if changes exist", repoRoot)
 		} else if opts.CreatePR {
-			LogInfo("[DRY RUN] Would check git status and create PR on chore/repokit-sync at %s if changes exist", repoRoot)
+			LogInfo("[DRY RUN] Would check git status and create PR on bot/repokit-sync at %s if changes exist", repoRoot)
 		}
 		return nil
 	}
@@ -1613,31 +1626,40 @@ func configureSingleRepository(opts ConfigureOptions) error {
 		statusOut, _, _, _ := RunCmd([]string{"git", "-C", repoRoot, "status", "--porcelain"}, "")
 		if strings.TrimSpace(statusOut) != "" {
 			LogInfo("Detected modified files in %s, creating PR...", repoRoot)
-			_, stderr, code, _ := RunCmd([]string{"git", "-C", repoRoot, "checkout", "-B", "chore/repokit-sync"}, "")
+			_, stderr, code, _ := RunCmd([]string{"git", "-C", repoRoot, "checkout", "-B", "bot/repokit-sync"}, "")
 			if code != 0 {
-				LogWarn("Failed to checkout branch chore/repokit-sync in %s: %s", repoRoot, strings.TrimSpace(stderr))
+				LogWarn("Failed to checkout branch bot/repokit-sync in %s: %s", repoRoot, strings.TrimSpace(stderr))
 			} else {
 				_, stderr, code, _ = RunCmd([]string{"git", "-C", repoRoot, "add", "-A"}, "")
 				if code != 0 {
 					LogWarn("Failed to stage changes in %s: %s", repoRoot, strings.TrimSpace(stderr))
 				} else {
-					commitMsg := "chore(repokit): configure repository governance, workflows, and templates"
-					_, stderr, code, _ = RunCmd([]string{"git", "-C", repoRoot, "commit", "-m", commitMsg}, "")
+					prTitle := "ci(repokit): automated sync of governance standards and workflows"
+					_, stderr, code, _ = RunCmd([]string{"git", "-C", repoRoot, "commit", "-m", prTitle}, "")
 					if code != 0 {
 						LogWarn("Failed to commit changes in %s: %s", repoRoot, strings.TrimSpace(stderr))
 					} else {
-						_, stderr, code, _ = RunCmd([]string{"git", "-C", repoRoot, "push", "-u", "origin", "chore/repokit-sync", "--force"}, "")
+						_, stderr, code, _ = RunCmd([]string{"git", "-C", repoRoot, "push", "-u", "origin", "bot/repokit-sync", "--force"}, "")
 						if code != 0 {
-							LogWarn("Failed to push chore/repokit-sync for %s: %s", slug, strings.TrimSpace(stderr))
+							LogWarn("Failed to push bot/repokit-sync for %s: %s", slug, strings.TrimSpace(stderr))
 						}
-						prBody := "Automated sync of repository governance, GitHub Actions workflows, and project templates via repokit configure."
+						prBody := buildSyncPRBody(opts.ReleaseRef)
 						prOut, prErr, prCode, _ := RunCmd([]string{
 							"gh", "pr", "create",
-							"--title", commitMsg,
+							"--repo", slug,
+							"--head", "bot/repokit-sync",
+							"--base", "main",
+							"--title", prTitle,
 							"--body", prBody,
 						}, repoRoot)
-						if prCode == 0 {
-							LogSuccess("Created PR for %s: %s", slug, strings.TrimSpace(prOut))
+						if prCode == 0 || strings.Contains(strings.ToLower(prErr), "a pull request") || strings.Contains(strings.ToLower(prOut), "a pull request") || strings.Contains(strings.ToLower(prErr), "already exists") {
+							if prCode == 0 {
+								LogSuccess("Created PR for %s: %s", slug, strings.TrimSpace(prOut))
+							} else {
+								LogInfo("PR for %s already exists.", slug)
+							}
+							RunCmd([]string{"gh", "pr", "merge", "bot/repokit-sync", "--auto", "--squash", "--delete-branch", "--repo", slug}, repoRoot)
+							LogInfo("Enabled CI-gated auto-merge on bot/repokit-sync for %s", slug)
 						} else {
 							LogWarn("gh pr create for %s: %s", slug, strings.TrimSpace(prErr))
 						}
@@ -1790,7 +1812,7 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 				if opts.DirectCommit {
 					LogInfo("[DRY RUN] Would check git status and commit directly to main at %s if changes exist", localPath)
 				} else if opts.CreatePR {
-					LogInfo("[DRY RUN] Would check git status and create PR on chore/repokit-sync at %s if changes exist", localPath)
+					LogInfo("[DRY RUN] Would check git status and create PR on bot/repokit-sync at %s if changes exist", localPath)
 				}
 			}
 			continue
@@ -1805,6 +1827,12 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 		}
 		if err := ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil); err != nil {
 			LogWarn("Failed to apply branch ruleset for %s: %v", slug, err)
+		}
+
+		isHub := strings.EqualFold(slug, DefaultGovernanceRepo) || strings.EqualFold(slug, "Cooper-Wallace/repokit") || strings.HasSuffix(strings.ToLower(slug), "/repokit")
+		if isHub {
+			LogInfo("Repository %s is the central governance hub; skipping downstream sync branch and PR creation.", slug)
+			continue
 		}
 
 		// Ephemeral clone for remote repos discovered without existing local clone
@@ -1860,9 +1888,9 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 					}
 				} else if opts.CreatePR {
 					LogInfo("Detected modified files in %s, creating PR...", localPath)
-					_, stderr, code, _ := RunCmd([]string{"git", "-C", localPath, "checkout", "-B", "chore/repokit-sync"}, "")
+					_, stderr, code, _ := RunCmd([]string{"git", "-C", localPath, "checkout", "-B", "bot/repokit-sync"}, "")
 					if code != 0 {
-						LogWarn("Failed to checkout branch chore/repokit-sync in %s: %s", localPath, strings.TrimSpace(stderr))
+						LogWarn("Failed to checkout branch bot/repokit-sync in %s: %s", localPath, strings.TrimSpace(stderr))
 						continue
 					}
 					_, stderr, code, _ = RunCmd([]string{"git", "-C", localPath, "add", "-A"}, "")
@@ -1870,20 +1898,23 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 						LogWarn("Failed to stage changes in %s: %s", localPath, strings.TrimSpace(stderr))
 						continue
 					}
-					commitMsg := "chore(repokit): configure latest governance, workflows, and templates"
-					_, stderr, code, _ = RunCmd([]string{"git", "-C", localPath, "commit", "-m", commitMsg}, "")
+					prTitle := "ci(repokit): automated sync of governance standards and workflows"
+					_, stderr, code, _ = RunCmd([]string{"git", "-C", localPath, "commit", "-m", prTitle}, "")
 					if code != 0 {
 						LogWarn("Failed to commit changes in %s: %s", localPath, strings.TrimSpace(stderr))
 						continue
 					}
-					_, stderr, code, _ = RunCmd([]string{"git", "-C", localPath, "push", "-u", "origin", "chore/repokit-sync", "--force"}, "")
+					_, stderr, code, _ = RunCmd([]string{"git", "-C", localPath, "push", "-u", "origin", "bot/repokit-sync", "--force"}, "")
 					if code != 0 {
-						LogWarn("Failed to push chore/repokit-sync for %s: %s", slug, strings.TrimSpace(stderr))
+						LogWarn("Failed to push bot/repokit-sync for %s: %s", slug, strings.TrimSpace(stderr))
 					}
-					prBody := "Automated sync of repository governance, GitHub Actions workflows, and project templates via repokit configuration engine."
+					prBody := buildSyncPRBody(opts.ReleaseRef)
 					prOut, prErr, prCode, _ := RunCmd([]string{
 						"gh", "pr", "create",
-						"--title", commitMsg,
+						"--repo", slug,
+						"--head", "bot/repokit-sync",
+						"--base", "main",
+						"--title", prTitle,
 						"--body", prBody,
 					}, localPath)
 					if prCode == 0 || strings.Contains(strings.ToLower(prErr), "a pull request") || strings.Contains(strings.ToLower(prOut), "a pull request") || strings.Contains(strings.ToLower(prErr), "already exists") {
@@ -1892,8 +1923,8 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 						} else {
 							LogInfo("PR for %s already exists.", slug)
 						}
-						RunCmd([]string{"gh", "pr", "merge", "chore/repokit-sync", "--auto", "--squash", "--repo", slug}, localPath)
-						LogInfo("Enabled CI-gated auto-merge on chore/repokit-sync for %s", slug)
+						RunCmd([]string{"gh", "pr", "merge", "bot/repokit-sync", "--auto", "--squash", "--delete-branch", "--repo", slug}, localPath)
+						LogInfo("Enabled CI-gated auto-merge on bot/repokit-sync for %s", slug)
 					} else {
 						LogWarn("gh pr create for %s: %s", slug, strings.TrimSpace(prErr))
 					}
@@ -2163,6 +2194,137 @@ func extractReleaseNotes(content string, version string) string {
 		}
 	}
 	return ""
+}
+
+// GetReleaseNotes extracts the markdown release notes section for a version from CHANGELOG.md.
+// If version starts with 'v', the prefix is stripped (e.g. v1.1.2 -> 1.1.2).
+// Looks for CHANGELOG.md in repoRoot, current directory, or ~/Projects/repokit/CHANGELOG.md.
+// If CHANGELOG.md exists:
+//   - If version is specified, it extracts the section starting with ## <version> up to the next ## section or EOF.
+//   - If version is empty or not found, it extracts the first ## <version> section.
+// If CHANGELOG.md is not found or empty, it returns an empty string.
+func GetReleaseNotes(repoRoot string, version string) string {
+	cleanVersion := strings.TrimSpace(version)
+	cleanVersion = strings.TrimPrefix(cleanVersion, "v")
+
+	var candidates []string
+	if repoRoot != "" {
+		if strings.HasSuffix(repoRoot, "CHANGELOG.md") {
+			candidates = append(candidates, repoRoot)
+		} else {
+			candidates = append(candidates, filepath.Join(repoRoot, "CHANGELOG.md"))
+		}
+	} else {
+		candidates = append(candidates, "CHANGELOG.md")
+		if home := os.Getenv("HOME"); home != "" {
+			candidates = append(candidates, filepath.Join(home, "Projects", "repokit", "CHANGELOG.md"))
+		}
+	}
+
+	var content string
+	for _, p := range candidates {
+		data, err := os.ReadFile(p)
+		if err == nil && len(bytes.TrimSpace(data)) > 0 {
+			content = string(data)
+			break
+		}
+	}
+
+	if strings.TrimSpace(content) == "" {
+		return ""
+	}
+
+	lines := strings.Split(content, "\n")
+	reNextHeader := regexp.MustCompile(`^##\s+`)
+	startIdx := -1
+	endIdx := -1
+
+	if cleanVersion != "" {
+		reHeader := regexp.MustCompile(`(?i)^##\s+(?:\[)?v?` + regexp.QuoteMeta(cleanVersion) + `(?:\b|[ \(\[])`)
+		for i, line := range lines {
+			if startIdx == -1 {
+				if reHeader.MatchString(line) {
+					startIdx = i
+				}
+			} else {
+				if reNextHeader.MatchString(line) {
+					endIdx = i
+					break
+				}
+			}
+		}
+	}
+
+	if startIdx == -1 {
+		// Version was empty or not found; extract the first ## <version> section
+		reFirstHeader := regexp.MustCompile(`(?i)^##\s+(?:\[)?v?[0-9]`)
+		for i, line := range lines {
+			if startIdx == -1 {
+				if reFirstHeader.MatchString(line) {
+					startIdx = i
+				}
+			} else {
+				if reNextHeader.MatchString(line) {
+					endIdx = i
+					break
+				}
+			}
+		}
+		// If no numeric version header found, fallback to any ## section
+		if startIdx == -1 {
+			for i, line := range lines {
+				if startIdx == -1 {
+					if reNextHeader.MatchString(line) {
+						startIdx = i
+					}
+				} else {
+					if reNextHeader.MatchString(line) {
+						endIdx = i
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if startIdx == -1 {
+		return ""
+	}
+
+	if endIdx == -1 {
+		endIdx = len(lines)
+	}
+
+	return strings.TrimSpace(strings.Join(lines[startIdx:endIdx], "\n"))
+}
+
+// buildSyncPRBody constructs the dynamic PR body for automated sync PRs.
+func buildSyncPRBody(releaseRef string) string {
+	body := `> 🤖 **Automated Governance Sync**
+> This pull request was automatically generated by [repokit](https://github.com/Cooper-Wallace/repokit) to synchronize centralized governance standards, reusable GitHub Actions workflows, and project templates.
+>
+> **Merge Policy**: This PR is queued for automated squash merge once all required status checks pass.`
+
+	releaseNotes := GetReleaseNotes("", releaseRef)
+	if releaseNotes != "" {
+		version := strings.TrimPrefix(releaseRef, "v")
+		if version == "" {
+			reVer := regexp.MustCompile(`(?i)^##\s+(?:\[)?v?([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[a-zA-Z0-9_.-]+)?)`)
+			if m := reVer.FindStringSubmatch(releaseNotes); len(m) > 1 {
+				version = m[1]
+			}
+		}
+		if version == "" {
+			version = releaseRef
+		}
+		if version == "" {
+			version = "latest"
+		}
+		body += fmt.Sprintf("\n\n### Release Notes (`%s`)\n%s", version, releaseNotes)
+	} else if releaseRef != "" {
+		body += fmt.Sprintf("\n\n### Propagated Version\nSynchronized to repokit release `%s`.", releaseRef)
+	}
+	return body
 }
 
 // UpdateChangelogContent prepends newSection under # Changelog or replaces existing version block.
