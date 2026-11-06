@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0 (2026-11-06)
+
+### Features
+
+* **propagation:** adopt bot/repokit-sync branch and embed release notes in sync PRs (#24) (28a2994)
+
 ## 1.1.2 (2026-11-06)
 
 ### Bug Fixes
