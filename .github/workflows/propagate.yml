@@ -80,7 +80,7 @@ jobs:
           if [ "${{ inputs.direct_commit }}" = "true" ]; then
             ARGS="$ARGS --direct --force"
           elif [ "${{ inputs.direct_commit }}" = "false" ] || [ "$GITHUB_EVENT_NAME" = "release" ]; then
-            ARGS="$ARGS --pr --force"
+            ARGS="$ARGS --pr --force --wait-for-merge"
           fi
 
           RELEASE_TAG="${{ github.event.release.tag_name }}"

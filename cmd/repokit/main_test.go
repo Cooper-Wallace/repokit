@@ -168,6 +168,14 @@ func TestConfigureDiscoveryCLI(t *testing.T) {
 	if code := run([]string{"configure", "--dry-run", "--repos=r1", "--push-main", "--release-ref=v1.1.0"}); code != 0 {
 		t.Errorf("Expected 0 for configure --dry-run --push-main --release-ref=..., got %d", code)
 	}
+
+	if code := run([]string{"configure", "--dry-run", "--repos=r1", "--pr", "--wait-for-merge", "--merge-timeout", "10m"}); code != 0 {
+		t.Errorf("Expected 0 for configure --dry-run --wait-for-merge --merge-timeout, got %d", code)
+	}
+
+	if code := run([]string{"configure", "--dry-run", "--repos=r1", "--pr", "--wait-for-merge", "--merge-timeout=2m"}); code != 0 {
+		t.Errorf("Expected 0 for configure --dry-run --wait-for-merge --merge-timeout=..., got %d", code)
+	}
 }
 
 func TestReleaseCLI(t *testing.T) {

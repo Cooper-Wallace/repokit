@@ -81,7 +81,6 @@ jobs:
               gh pr create \
                 --title "ci(repokit): automated sync of governance standards and workflows" \
                 --body "$BODY_TEXT" \
-                --base main \
                 --head bot/repokit-sync || echo "PR creation failed"
             fi
           else
