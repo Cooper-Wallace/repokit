@@ -1140,6 +1140,12 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 			autoMergePassed = ghData["allow_auto_merge"] == false
 		}
 
+		defaultBranch, _ := ghData["default_branch"].(string)
+		if defaultBranch == "" {
+			defaultBranch, _ = GetRepoDefaultBranch(slug, repoRoot)
+		}
+		defaultBranchPassed := defaultBranch == "main"
+
 		stdoutRules, _, codeRules, _ := RunCmd([]string{"gh", "api", fmt.Sprintf("repos/%s/rulesets", slug)}, "")
 		hasRuleset := false
 		rulesetHasStatusChecks := false
@@ -1206,6 +1212,7 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 		}
 
 		remoteItems = []CheckItem{
+			{Label: "Default Branch is 'main'", Passed: defaultBranchPassed},
 			{Label: "Squash & Merge Enabled", Passed: squashEnabled},
 			{Label: "Merge Commits Disabled", Passed: mergeCommitDisabled},
 			{Label: "Rebase Commits Disabled", Passed: rebaseDisabled},
@@ -1526,9 +1533,21 @@ type ConfigureOptions struct {
 	Force        bool
 	DryRun       bool
 	CreatePR     bool
-	DirectCommit bool   // commit and push directly to main branch
-	ReleaseRef   string // release reference tag (e.g. "v1.1.0"), defaults to "latest" if empty
+	DirectCommit bool          // commit and push directly to main branch
+	ReleaseRef   string        // release reference tag (e.g. "v1.1.0"), defaults to "latest" if empty
+	WaitForMerge bool          // wait for downstream synchronization PRs to auto-merge
+	MergeTimeout time.Duration // timeout for downstream PR auto-merge verification
 }
+
+type SyncPRInfo struct {
+	Slug     string `json:"slug"`
+	Branch   string `json:"branch"`
+	PRNumber int    `json:"number,omitempty"`
+	PRURL    string `json:"url,omitempty"`
+}
+
+// SyncPRPollInterval is the duration between poll attempts in WaitForSyncPRs.
+var SyncPRPollInterval = 10 * time.Second
 
 // PropagateOptions is an alias for ConfigureOptions for backward compatibility.
 type PropagateOptions = ConfigureOptions
@@ -1565,6 +1584,11 @@ func configureSingleRepository(opts ConfigureOptions) error {
 	if err != nil || slug == "" {
 		LogError("Could not find GitHub remote origin URL for this repository.")
 		return fmt.Errorf("could not find GitHub remote origin URL")
+	}
+
+	defaultBranch, _ := GetRepoDefaultBranch(slug, repoRoot)
+	if defaultBranch != "" && defaultBranch != "main" {
+		LogWarn("[%s] Non-standard default branch detected: '%s' (expected 'main').", slug, defaultBranch)
 	}
 
 	if IsVaultOrExemptRepo(slug) {
@@ -1648,7 +1672,6 @@ func configureSingleRepository(opts ConfigureOptions) error {
 							"gh", "pr", "create",
 							"--repo", slug,
 							"--head", "bot/repokit-sync",
-							"--base", "main",
 							"--title", prTitle,
 							"--body", prBody,
 						}, repoRoot)
@@ -1660,6 +1683,13 @@ func configureSingleRepository(opts ConfigureOptions) error {
 							}
 							RunCmd([]string{"gh", "pr", "merge", "bot/repokit-sync", "--auto", "--squash", "--delete-branch", "--repo", slug}, repoRoot)
 							LogInfo("Enabled CI-gated auto-merge on bot/repokit-sync for %s", slug)
+							if opts.WaitForMerge {
+								LogInfo("Waiting for downstream synchronization PR to auto-merge on %s...", slug)
+								pending := []SyncPRInfo{{Slug: slug, Branch: "bot/repokit-sync"}}
+								if _, err := WaitForSyncPRs(pending, opts.MergeTimeout); err != nil {
+									return err
+								}
+							}
 						} else {
 							LogWarn("gh pr create for %s: %s", slug, strings.TrimSpace(prErr))
 						}
@@ -1677,6 +1707,7 @@ func configureSingleRepository(opts ConfigureOptions) error {
 }
 
 func configureMultipleRepositories(opts ConfigureOptions) error {
+	var pendingPRs []SyncPRInfo
 	localBaseDir := opts.LocalDir
 	if localBaseDir == "" {
 		home := os.Getenv("HOME")
@@ -1803,6 +1834,11 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 			}
 		}
 
+		defaultBranch, _ := GetRepoDefaultBranch(slug, localPath)
+		if defaultBranch != "" && defaultBranch != "main" {
+			LogWarn("[%s] Non-standard default branch detected: '%s' (expected 'main').", slug, defaultBranch)
+		}
+
 		if opts.DryRun {
 			LogInfo("[DRY RUN] Would apply remote GitHub repo settings to %s", slug)
 			LogInfo("[DRY RUN] Would apply workflow permissions to %s", slug)
@@ -1913,7 +1949,6 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 						"gh", "pr", "create",
 						"--repo", slug,
 						"--head", "bot/repokit-sync",
-						"--base", "main",
 						"--title", prTitle,
 						"--body", prBody,
 					}, localPath)
@@ -1925,6 +1960,10 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 						}
 						RunCmd([]string{"gh", "pr", "merge", "bot/repokit-sync", "--auto", "--squash", "--delete-branch", "--repo", slug}, localPath)
 						LogInfo("Enabled CI-gated auto-merge on bot/repokit-sync for %s", slug)
+						pendingPRs = append(pendingPRs, SyncPRInfo{
+							Slug:   slug,
+							Branch: "bot/repokit-sync",
+						})
 					} else {
 						LogWarn("gh pr create for %s: %s", slug, strings.TrimSpace(prErr))
 					}
@@ -1939,9 +1978,248 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 		}
 	}
 
+	if opts.WaitForMerge && len(pendingPRs) > 0 {
+		LogInfo("Waiting for %d downstream synchronization PRs to auto-merge...", len(pendingPRs))
+		if _, err := WaitForSyncPRs(pendingPRs, opts.MergeTimeout); err != nil {
+			return err
+		}
+	}
+
 	fmt.Println()
 	LogSuccess("Repository configuration complete across %d repositories!", len(targetSlugs))
 	return nil
+}
+
+type ghPRViewOutput struct {
+	Number            int                  `json:"number"`
+	URL               string               `json:"url"`
+	State             string               `json:"state"`
+	StatusCheckRollup []ghStatusCheckEntry `json:"statusCheckRollup"`
+}
+
+type ghStatusCheckEntry struct {
+	Typename   string `json:"__typename,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Context    string `json:"context,omitempty"`
+	Status     string `json:"status,omitempty"`
+	State      string `json:"state,omitempty"`
+	Conclusion string `json:"conclusion,omitempty"`
+	DetailsURL string `json:"detailsUrl,omitempty"`
+	TargetURL  string `json:"targetUrl,omitempty"`
+	URL        string `json:"url,omitempty"`
+}
+
+// WaitForSyncPRs polls active downstream synchronization PRs until merged, closed, failed, or timed out.
+func WaitForSyncPRs(prs []SyncPRInfo, timeout time.Duration) ([]SyncPRInfo, error) {
+	if len(prs) == 0 {
+		return prs, nil
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+
+	type prTrackStatus struct {
+		info          SyncPRInfo
+		merged        bool
+		failed        bool
+		failureReason string
+	}
+
+	statuses := make([]prTrackStatus, len(prs))
+	for i, p := range prs {
+		statuses[i] = prTrackStatus{info: p}
+	}
+
+	startTime := time.Now()
+	deadline := startTime.Add(timeout)
+
+	for {
+		for i := range statuses {
+			if statuses[i].merged || statuses[i].failed {
+				continue
+			}
+
+			stdout, stderr, code, _ := RunCmd([]string{
+				"gh", "pr", "view", statuses[i].info.Branch,
+				"--repo", statuses[i].info.Slug,
+				"--json", "state,statusCheckRollup,url,number",
+			}, "")
+
+			if code != 0 {
+				if time.Now().After(deadline) {
+					statuses[i].failed = true
+					statuses[i].failureReason = fmt.Sprintf("gh pr view failed (exit code %d): %s", code, strings.TrimSpace(stderr))
+				}
+				continue
+			}
+
+			var prView ghPRViewOutput
+			if err := json.Unmarshal([]byte(stdout), &prView); err != nil {
+				continue
+			}
+
+			if prView.Number > 0 {
+				statuses[i].info.PRNumber = prView.Number
+			}
+			if prView.URL != "" {
+				statuses[i].info.PRURL = prView.URL
+			}
+
+			stateUpper := strings.ToUpper(strings.TrimSpace(prView.State))
+			if stateUpper == "MERGED" {
+				statuses[i].merged = true
+				LogSuccess("[%s] Downstream PR #%d merged successfully: %s", statuses[i].info.Slug, statuses[i].info.PRNumber, statuses[i].info.PRURL)
+				continue
+			}
+			if stateUpper == "CLOSED" {
+				statuses[i].failed = true
+				statuses[i].failureReason = "PR was closed without merging"
+				continue
+			}
+
+			// Check status check rollup
+			for _, check := range prView.StatusCheckRollup {
+				statusUpper := strings.ToUpper(strings.TrimSpace(check.Status))
+				concUpper := strings.ToUpper(strings.TrimSpace(check.Conclusion))
+				stateUpper := strings.ToUpper(strings.TrimSpace(check.State))
+
+				isFailedConc := concUpper == "FAILURE" ||
+					concUpper == "CANCELLED" ||
+					concUpper == "TIMED_OUT" ||
+					concUpper == "ACTION_REQUIRED"
+				isFailedState := stateUpper == "FAILURE" || stateUpper == "ERROR"
+
+				if (statusUpper == "COMPLETED" && isFailedConc) || isFailedState {
+					checkName := check.Name
+					if checkName == "" {
+						checkName = check.Context
+					}
+					if checkName == "" {
+						checkName = "unnamed check"
+					}
+					checkURL := check.DetailsURL
+					if checkURL == "" {
+						checkURL = check.TargetURL
+					}
+					if checkURL == "" {
+						checkURL = check.URL
+					}
+
+					conc := concUpper
+					if conc == "" {
+						conc = stateUpper
+					}
+
+					statuses[i].failed = true
+					if checkURL != "" {
+						statuses[i].failureReason = fmt.Sprintf("CI check %q failed (%s): %s", checkName, conc, checkURL)
+					} else {
+						statuses[i].failureReason = fmt.Sprintf("CI check %q failed (%s)", checkName, conc)
+					}
+					break
+				}
+			}
+		}
+
+		allDone := true
+		for i := range statuses {
+			if !statuses[i].merged && !statuses[i].failed {
+				allDone = false
+				break
+			}
+		}
+		if allDone {
+			break
+		}
+
+		if time.Now().After(deadline) {
+			for i := range statuses {
+				if !statuses[i].merged && !statuses[i].failed {
+					statuses[i].failed = true
+					statuses[i].failureReason = fmt.Sprintf("timed out after %v waiting for auto-merge", timeout)
+				}
+			}
+			break
+		}
+
+		pollInterval := SyncPRPollInterval
+		if pollInterval <= 0 {
+			pollInterval = 10 * time.Millisecond
+		}
+		remaining := time.Until(deadline)
+		if remaining < pollInterval {
+			pollInterval = remaining
+		}
+		if pollInterval > 0 {
+			time.Sleep(pollInterval)
+		}
+	}
+
+	var failedSlugs []string
+	resultPRs := make([]SyncPRInfo, len(statuses))
+	for i, st := range statuses {
+		resultPRs[i] = st.info
+		if st.failed || !st.merged {
+			failedSlugs = append(failedSlugs, st.info.Slug)
+			LogError("[%s] Downstream PR failed: %s (PR: %s)", st.info.Slug, st.failureReason, st.info.PRURL)
+		}
+	}
+
+	if len(failedSlugs) > 0 {
+		return resultPRs, fmt.Errorf("downstream synchronization PRs failed to merge for %d repositories: %s", len(failedSlugs), strings.Join(failedSlugs, ", "))
+	}
+
+	LogSuccess("All %d downstream synchronization PRs merged successfully!", len(prs))
+	return resultPRs, nil
+}
+
+// GetRepoDefaultBranch queries GitHub or local git to determine the repository's default branch.
+func GetRepoDefaultBranch(slug string, repoDir string) (string, error) {
+	if slug != "" {
+		stdout, _, code, _ := RunCmd([]string{"gh", "repo", "view", slug, "--json", "defaultBranchRef"}, repoDir)
+		if code == 0 && strings.TrimSpace(stdout) != "" {
+			var resp struct {
+				DefaultBranchRef struct {
+					Name string `json:"name"`
+				} `json:"defaultBranchRef"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &resp); err == nil && resp.DefaultBranchRef.Name != "" {
+				return resp.DefaultBranchRef.Name, nil
+			}
+		}
+		stdout, _, code, _ = RunCmd([]string{"gh", "api", fmt.Sprintf("repos/%s", slug)}, repoDir)
+		if code == 0 && strings.TrimSpace(stdout) != "" {
+			var data map[string]interface{}
+			if err := json.Unmarshal([]byte(stdout), &data); err == nil {
+				if db, ok := data["default_branch"].(string); ok && strings.TrimSpace(db) != "" {
+					return strings.TrimSpace(db), nil
+				}
+			}
+		}
+	}
+	if repoDir != "" {
+		stdout, _, code, _ := RunCmd([]string{"git", "-C", repoDir, "symbolic-ref", "refs/remotes/origin/HEAD"}, repoDir)
+		if code == 0 && strings.TrimSpace(stdout) != "" {
+			ref := strings.TrimSpace(stdout)
+			parts := strings.Split(ref, "/")
+			if len(parts) > 0 && parts[len(parts)-1] != "" {
+				return parts[len(parts)-1], nil
+			}
+		}
+		stdout, _, code, _ = RunCmd([]string{"git", "-C", repoDir, "rev-parse", "--abbrev-ref", "origin/HEAD"}, repoDir)
+		if code == 0 && strings.TrimSpace(stdout) != "" {
+			ref := strings.TrimSpace(stdout)
+			parts := strings.Split(ref, "/")
+			if len(parts) > 0 && parts[len(parts)-1] != "" && parts[len(parts)-1] != "HEAD" {
+				return parts[len(parts)-1], nil
+			}
+		}
+		stdout, _, code, _ = RunCmd([]string{"git", "-C", repoDir, "branch", "--show-current"}, repoDir)
+		if code == 0 && strings.TrimSpace(stdout) != "" {
+			return strings.TrimSpace(stdout), nil
+		}
+	}
+	return "", fmt.Errorf("unable to determine default branch for repository %s", slug)
 }
 
 // Release Automation Types & Engine

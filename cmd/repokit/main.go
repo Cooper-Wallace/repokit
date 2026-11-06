@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Cooper-Wallace/repokit"
 )
@@ -21,7 +22,7 @@ Commands:
   create <name> [-d/--description] [-t/--type <python|java|typescript|bash|go>] [--public] [--path <dir>]
       Create a new standardized GitHub repository with automated DevOps scaffolding.
 
-  configure [path] [-f/--force] [--all] [--repos <r1,r2>] [--dry-run] [--pr] [--direct] [--release-ref <tag>]
+  configure [path] [-f/--force] [--all] [--repos <r1,r2>] [--dry-run] [--pr] [--direct] [--release-ref <tag>] [--wait-for-merge] [--merge-timeout <dur>]
       Apply DevOps standards, branch rulesets, hooks, and CI workflows to an existing repo (or across --all).
 
   audit [path] [-t/--type <python|java|typescript|bash|go>] [--local] [--remote]
@@ -146,6 +147,15 @@ func run(args []string) int {
 				}
 			case "--local":
 				opts.Local = true
+			case "--wait-for-merge":
+				opts.WaitForMerge = true
+			case "--merge-timeout":
+				if i+1 < len(cmdArgs) {
+					i++
+					if d, err := time.ParseDuration(cmdArgs[i]); err == nil {
+						opts.MergeTimeout = d
+					}
+				}
 			case "--repos":
 				if i+1 < len(cmdArgs) {
 					i++
@@ -163,7 +173,11 @@ func run(args []string) int {
 					path = cmdArgs[i]
 				}
 			default:
-				if strings.HasPrefix(arg, "--release-ref=") {
+				if strings.HasPrefix(arg, "--merge-timeout=") {
+					if d, err := time.ParseDuration(strings.TrimPrefix(arg, "--merge-timeout=")); err == nil {
+						opts.MergeTimeout = d
+					}
+				} else if strings.HasPrefix(arg, "--release-ref=") {
 					opts.ReleaseRef = strings.TrimPrefix(arg, "--release-ref=")
 				} else if strings.HasPrefix(arg, "--repos=") {
 					reposStr := strings.TrimPrefix(arg, "--repos=")

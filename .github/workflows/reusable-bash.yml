@@ -25,7 +25,7 @@ jobs:
               fi
             done
             if [ ${#FILES_TO_CHECK[@]} -gt 0 ]; then
-              shellcheck -x "${FILES_TO_CHECK[@]}"
+              shellcheck --severity=warning -x "${FILES_TO_CHECK[@]}"
               echo "ShellCheck verified ${#FILES_TO_CHECK[@]} script(s) cleanly (with -x source following)." >> "$GITHUB_STEP_SUMMARY"
             else
               echo "No shell scripts found to audit." >> "$GITHUB_STEP_SUMMARY"

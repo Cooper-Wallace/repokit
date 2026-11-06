@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestConventionalCommits(t *testing.T) {
@@ -2144,8 +2145,8 @@ func TestConfigureWithOptions(t *testing.T) {
 		if !hasArgPair(prCreateArgs, "--title", "ci(repokit): automated sync of governance standards and workflows") {
 			t.Errorf("Expected --title 'ci(repokit): automated sync of governance standards and workflows' in gh pr create args, got: %v", prCreateArgs)
 		}
-		if !hasArgPair(prCreateArgs, "--base", "main") {
-			t.Errorf("Expected --base main in gh pr create args, got: %v", prCreateArgs)
+		if hasArg(prCreateArgs, "--base") {
+			t.Errorf("Expected gh pr create not to pass --base, got: %v", prCreateArgs)
 		}
 		if !prAutoMerged {
 			t.Errorf("Expected gh pr merge ... --auto --squash to be called")
@@ -2218,8 +2219,8 @@ func TestConfigureWithOptions(t *testing.T) {
 		if !hasArgPair(prCreateExistingArgs, "--title", "ci(repokit): automated sync of governance standards and workflows") {
 			t.Errorf("Expected --title 'ci(repokit): automated sync of governance standards and workflows' in gh pr create args, got: %v", prCreateExistingArgs)
 		}
-		if !hasArgPair(prCreateExistingArgs, "--base", "main") {
-			t.Errorf("Expected --base main in gh pr create args, got: %v", prCreateExistingArgs)
+		if hasArg(prCreateExistingArgs, "--base") {
+			t.Errorf("Expected gh pr create not to pass --base, got: %v", prCreateExistingArgs)
 		}
 		if !prAutoMergedExisting {
 			t.Errorf("Expected gh pr merge --auto --squash to be called when PR already exists")
@@ -2474,8 +2475,8 @@ func TestConfigureWithOptions(t *testing.T) {
 		if !hasArgPair(prCreateArgs, "--title", "ci(repokit): automated sync of governance standards and workflows") {
 			t.Errorf("Expected --title 'ci(repokit): automated sync of governance standards and workflows' in gh pr create args, got: %v", prCreateArgs)
 		}
-		if !hasArgPair(prCreateArgs, "--base", "main") {
-			t.Errorf("Expected --base main in gh pr create args, got: %v", prCreateArgs)
+		if hasArg(prCreateArgs, "--base") {
+			t.Errorf("Expected gh pr create not to pass --base, got: %v", prCreateArgs)
 		}
 		if !prAutoMerged {
 			t.Errorf("Expected gh pr merge to be called")
@@ -2536,6 +2537,228 @@ func TestConfigureWithOptions(t *testing.T) {
 		}
 		if apiCalled {
 			t.Errorf("Expected ApplyBranchRuleset to skip API calls for profile repo")
+		}
+	})
+
+	t.Run("configure_multiple_wait_for_merge_success", func(t *testing.T) {
+		oldPoll := SyncPRPollInterval
+		SyncPRPollInterval = 5 * time.Millisecond
+		defer func() { SyncPRPollInterval = oldPoll }()
+
+		tmpDir := t.TempDir()
+		repoA := filepath.Join(tmpDir, "repo-sync-wait")
+		_ = os.MkdirAll(repoA, 0755)
+
+		cInit := exec.Command("git", "init", "-b", "main")
+		cInit.Dir = repoA
+		_ = cInit.Run()
+		cRemote := exec.Command("git", "remote", "add", "origin", "https://github.com/user/repo-sync-wait.git")
+		cRemote.Dir = repoA
+		_ = cRemote.Run()
+		cConfigU := exec.Command("git", "config", "user.name", "Test")
+		cConfigU.Dir = repoA
+		_ = cConfigU.Run()
+		cConfigE := exec.Command("git", "config", "user.email", "test@test.com")
+		cConfigE.Dir = repoA
+		_ = cConfigE.Run()
+
+		var prViewCalled bool
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 0 && args[0] == "git" {
+				for _, a := range args {
+					if a == "push" || a == "checkout" || a == "set-url" {
+						return "", "", 0, nil
+					}
+				}
+				return defaultCommandRunner(args, dir, input)
+			}
+			if len(args) >= 6 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" {
+				prViewCalled = true
+				return `{"number": 1, "url": "https://github.com/user/repo-sync-wait/pull/1", "state": "MERGED"}`, "", 0, nil
+			}
+			if len(args) > 1 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
+				return "https://github.com/user/repo-sync-wait/pull/1", "", 0, nil
+			}
+			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
+				return "", "", 0, nil
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			Local:        true,
+			LocalDir:     tmpDir,
+			CreatePR:     true,
+			WaitForMerge: true,
+			MergeTimeout: 500 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("Expected ConfigureWithOptions with WaitForMerge to succeed, got: %v", err)
+		}
+		if !prViewCalled {
+			t.Errorf("Expected gh pr view to be called while waiting for merge")
+		}
+	})
+
+	t.Run("configure_multiple_wait_for_merge_failure", func(t *testing.T) {
+		oldPoll := SyncPRPollInterval
+		SyncPRPollInterval = 5 * time.Millisecond
+		defer func() { SyncPRPollInterval = oldPoll }()
+
+		tmpDir := t.TempDir()
+		repoA := filepath.Join(tmpDir, "repo-sync-fail")
+		_ = os.MkdirAll(repoA, 0755)
+
+		cInit := exec.Command("git", "init", "-b", "main")
+		cInit.Dir = repoA
+		_ = cInit.Run()
+		cRemote := exec.Command("git", "remote", "add", "origin", "https://github.com/user/repo-sync-fail.git")
+		cRemote.Dir = repoA
+		_ = cRemote.Run()
+		cConfigU := exec.Command("git", "config", "user.name", "Test")
+		cConfigU.Dir = repoA
+		_ = cConfigU.Run()
+		cConfigE := exec.Command("git", "config", "user.email", "test@test.com")
+		cConfigE.Dir = repoA
+		_ = cConfigE.Run()
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 0 && args[0] == "git" {
+				for _, a := range args {
+					if a == "push" || a == "checkout" || a == "set-url" {
+						return "", "", 0, nil
+					}
+				}
+				return defaultCommandRunner(args, dir, input)
+			}
+			if len(args) >= 6 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" {
+				return `{"number": 1, "url": "https://github.com/user/repo-sync-fail/pull/1", "state": "OPEN", "statusCheckRollup": [{"name": "Verification", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://ci/job/1"}]}`, "", 0, nil
+			}
+			if len(args) > 1 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
+				return "https://github.com/user/repo-sync-fail/pull/1", "", 0, nil
+			}
+			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
+				return "", "", 0, nil
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			Local:        true,
+			LocalDir:     tmpDir,
+			CreatePR:     true,
+			WaitForMerge: true,
+			MergeTimeout: 500 * time.Millisecond,
+		})
+		if err == nil {
+			t.Fatalf("Expected ConfigureWithOptions to fail when downstream PR fails CI, but got nil")
+		}
+		if !strings.Contains(err.Error(), "user/repo-sync-fail") {
+			t.Errorf("Expected error message to mention failed repo slug, got: %v", err)
+		}
+	})
+
+	t.Run("configure_single_repo_wait_for_merge_success", func(t *testing.T) {
+		oldPoll := SyncPRPollInterval
+		SyncPRPollInterval = 5 * time.Millisecond
+		defer func() { SyncPRPollInterval = oldPoll }()
+
+		tmpDir := t.TempDir()
+		cInit := exec.Command("git", "init", "-b", "main")
+		cInit.Dir = tmpDir
+		_ = cInit.Run()
+		cRemote := exec.Command("git", "remote", "add", "origin", "https://github.com/user/single-repo-wait.git")
+		cRemote.Dir = tmpDir
+		_ = cRemote.Run()
+
+		var prViewCalled bool
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 0 && args[0] == "git" {
+				for _, a := range args {
+					if a == "push" || a == "checkout" || a == "commit" || a == "add" {
+						return "", "", 0, nil
+					}
+					if a == "status" {
+						return " M README.md\n", "", 0, nil
+					}
+				}
+				return defaultCommandRunner(args, dir, input)
+			}
+			if len(args) >= 6 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" {
+				prViewCalled = true
+				return `{"number": 2, "url": "https://github.com/user/single-repo-wait/pull/2", "state": "MERGED"}`, "", 0, nil
+			}
+			if len(args) > 1 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
+				return "https://github.com/user/single-repo-wait/pull/2", "", 0, nil
+			}
+			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
+				return "", "", 0, nil
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			TargetDir:    tmpDir,
+			CreatePR:     true,
+			WaitForMerge: true,
+			MergeTimeout: 500 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("Expected single repo ConfigureWithOptions with WaitForMerge to succeed, got: %v", err)
+		}
+		if !prViewCalled {
+			t.Errorf("Expected gh pr view to be called for single repo wait")
+		}
+	})
+
+	t.Run("configure_single_repo_wait_for_merge_failure", func(t *testing.T) {
+		oldPoll := SyncPRPollInterval
+		SyncPRPollInterval = 5 * time.Millisecond
+		defer func() { SyncPRPollInterval = oldPoll }()
+
+		tmpDir := t.TempDir()
+		cInit := exec.Command("git", "init", "-b", "main")
+		cInit.Dir = tmpDir
+		_ = cInit.Run()
+		cRemote := exec.Command("git", "remote", "add", "origin", "https://github.com/user/single-repo-fail.git")
+		cRemote.Dir = tmpDir
+		_ = cRemote.Run()
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 0 && args[0] == "git" {
+				for _, a := range args {
+					if a == "push" || a == "checkout" || a == "commit" || a == "add" {
+						return "", "", 0, nil
+					}
+					if a == "status" {
+						return " M README.md\n", "", 0, nil
+					}
+				}
+				return defaultCommandRunner(args, dir, input)
+			}
+			if len(args) >= 6 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" {
+				return `{"number": 3, "url": "https://github.com/user/single-repo-fail/pull/3", "state": "OPEN", "statusCheckRollup": [{"name": "CI", "status": "COMPLETED", "conclusion": "FAILURE"}]}`, "", 0, nil
+			}
+			if len(args) > 1 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
+				return "https://github.com/user/single-repo-fail/pull/3", "", 0, nil
+			}
+			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
+				return "", "", 0, nil
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			TargetDir:    tmpDir,
+			CreatePR:     true,
+			WaitForMerge: true,
+			MergeTimeout: 500 * time.Millisecond,
+		})
+		if err == nil {
+			t.Fatalf("Expected single repo ConfigureWithOptions to fail when CI fails, got nil")
+		}
+		if !strings.Contains(err.Error(), "user/single-repo-fail") {
+			t.Errorf("Expected error to mention user/single-repo-fail, got: %v", err)
 		}
 	})
 }
@@ -3398,6 +3621,350 @@ Synchronized to repokit release ` + "`v2.0.0`."
 
 		if !strings.Contains(body, "Synchronized to repokit release `v2.0.0`.") {
 			t.Errorf("Expected propagated version text")
+		}
+	})
+}
+
+func TestWaitForSyncPRs(t *testing.T) {
+	oldRunner := CommandRunner
+	oldPollInterval := SyncPRPollInterval
+	defer func() {
+		CommandRunner = oldRunner
+		SyncPRPollInterval = oldPollInterval
+	}()
+	SyncPRPollInterval = 5 * time.Millisecond
+
+	t.Run("empty_prs_list", func(t *testing.T) {
+		res, err := WaitForSyncPRs(nil, 5*time.Second)
+		if err != nil {
+			t.Fatalf("Expected nil error for empty prs, got: %v", err)
+		}
+		if len(res) != 0 {
+			t.Errorf("Expected 0 prs returned, got %d", len(res))
+		}
+	})
+
+	t.Run("all_prs_merged_successfully", func(t *testing.T) {
+		prs := []SyncPRInfo{
+			{Slug: "org/repo-a", Branch: "bot/repokit-sync"},
+			{Slug: "org/repo-b", Branch: "bot/repokit-sync"},
+		}
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 6 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" {
+				slug := args[5]
+				var num int
+				if slug == "org/repo-a" {
+					num = 101
+				} else {
+					num = 102
+				}
+				resp := ghPRViewOutput{
+					Number: num,
+					URL:    fmt.Sprintf("https://github.com/%s/pull/%d", slug, num),
+					State:  "MERGED",
+				}
+				data, _ := json.Marshal(resp)
+				return string(data), "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		res, err := WaitForSyncPRs(prs, 200*time.Millisecond)
+		if err != nil {
+			t.Fatalf("Expected all PRs to merge cleanly, got error: %v", err)
+		}
+		if len(res) != 2 {
+			t.Fatalf("Expected 2 PRs in result, got %d", len(res))
+		}
+		if res[0].PRNumber != 101 || res[0].PRURL != "https://github.com/org/repo-a/pull/101" {
+			t.Errorf("Expected repo-a PR details populated, got: %+v", res[0])
+		}
+		if res[1].PRNumber != 102 || res[1].PRURL != "https://github.com/org/repo-b/pull/102" {
+			t.Errorf("Expected repo-b PR details populated, got: %+v", res[1])
+		}
+	})
+
+	t.Run("pr_check_failure_surfaces_error", func(t *testing.T) {
+		failures := []struct {
+			name       string
+			status     string
+			conclusion string
+			state      string
+		}{
+			{name: "failure_conclusion", status: "COMPLETED", conclusion: "FAILURE"},
+			{name: "cancelled_conclusion", status: "COMPLETED", conclusion: "CANCELLED"},
+			{name: "timed_out_conclusion", status: "COMPLETED", conclusion: "TIMED_OUT"},
+			{name: "action_required_conclusion", status: "COMPLETED", conclusion: "ACTION_REQUIRED"},
+			{name: "state_error", status: "COMPLETED", state: "ERROR"},
+		}
+
+		for _, tc := range failures {
+			t.Run(tc.name, func(t *testing.T) {
+				prs := []SyncPRInfo{
+					{Slug: "org/repo-fail", Branch: "bot/repokit-sync"},
+				}
+				CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+					if len(args) >= 6 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" {
+						resp := ghPRViewOutput{
+							Number: 55,
+							URL:    "https://github.com/org/repo-fail/pull/55",
+							State:  "OPEN",
+							StatusCheckRollup: []ghStatusCheckEntry{
+								{
+									Name:       "Quality Gate / Verification",
+									Status:     tc.status,
+									Conclusion: tc.conclusion,
+									State:      tc.state,
+									DetailsURL: "https://github.com/org/repo-fail/actions/runs/12345",
+								},
+							},
+						}
+						data, _ := json.Marshal(resp)
+						return string(data), "", 0, nil
+					}
+					return defaultCommandRunner(args, dir, input)
+				}
+
+				res, err := WaitForSyncPRs(prs, 200*time.Millisecond)
+				if err == nil {
+					t.Fatalf("Expected error when check fails, got nil")
+				}
+				if !strings.Contains(err.Error(), "org/repo-fail") {
+					t.Errorf("Expected error to mention failed slug, got: %v", err)
+				}
+				if len(res) > 0 && res[0].PRNumber != 55 {
+					t.Errorf("Expected PR number 55 populated, got %d", res[0].PRNumber)
+				}
+			})
+		}
+	})
+
+	t.Run("pr_closed_without_merging_surfaces_error", func(t *testing.T) {
+		prs := []SyncPRInfo{
+			{Slug: "org/repo-closed", Branch: "bot/repokit-sync"},
+		}
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 6 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" {
+				resp := ghPRViewOutput{
+					Number: 99,
+					URL:    "https://github.com/org/repo-closed/pull/99",
+					State:  "CLOSED",
+				}
+				data, _ := json.Marshal(resp)
+				return string(data), "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		_, err := WaitForSyncPRs(prs, 100*time.Millisecond)
+		if err == nil {
+			t.Fatalf("Expected error when PR is closed, got nil")
+		}
+		if !strings.Contains(err.Error(), "org/repo-closed") {
+			t.Errorf("Expected error to mention org/repo-closed, got: %v", err)
+		}
+	})
+
+	t.Run("timeout_expires_surfaces_error", func(t *testing.T) {
+		prs := []SyncPRInfo{
+			{Slug: "org/repo-slow", Branch: "bot/repokit-sync"},
+		}
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 6 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" {
+				resp := ghPRViewOutput{
+					Number: 12,
+					URL:    "https://github.com/org/repo-slow/pull/12",
+					State:  "OPEN",
+					StatusCheckRollup: []ghStatusCheckEntry{
+						{
+							Name:   "Quality Gate / Verification",
+							Status: "IN_PROGRESS",
+						},
+					},
+				}
+				data, _ := json.Marshal(resp)
+				return string(data), "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		_, err := WaitForSyncPRs(prs, 20*time.Millisecond)
+		if err == nil {
+			t.Fatalf("Expected timeout error, got nil")
+		}
+		if !strings.Contains(err.Error(), "org/repo-slow") {
+			t.Errorf("Expected error to mention org/repo-slow, got: %v", err)
+		}
+	})
+}
+
+func TestDefaultBranchVerification(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	t.Run("get_repo_default_branch_via_gh_repo_view", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 4 && args[0] == "gh" && args[1] == "repo" && args[2] == "view" {
+				return `{"defaultBranchRef":{"name":"main"}}`, "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+		branch, err := GetRepoDefaultBranch("owner/repo", "")
+		if err != nil {
+			t.Fatalf("Expected no error, got: %v", err)
+		}
+		if branch != "main" {
+			t.Errorf("Expected 'main', got %q", branch)
+		}
+	})
+
+	t.Run("get_repo_default_branch_via_gh_api_fallback", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 4 && args[0] == "gh" && args[1] == "repo" && args[2] == "view" {
+				return "", "view failed", 1, nil
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "api" && args[2] == "repos/owner/repo" {
+				return `{"default_branch":"master"}`, "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+		branch, err := GetRepoDefaultBranch("owner/repo", "")
+		if err != nil {
+			t.Fatalf("Expected no error, got: %v", err)
+		}
+		if branch != "master" {
+			t.Errorf("Expected 'master', got %q", branch)
+		}
+	})
+
+	t.Run("get_repo_default_branch_via_local_git", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cmd := exec.Command("git", "init", "-b", "main")
+		cmd.Dir = tmpDir
+		_ = cmd.Run()
+
+		CommandRunner = defaultCommandRunner
+		branch, err := GetRepoDefaultBranch("", tmpDir)
+		if err != nil {
+			t.Fatalf("Expected no error from local git, got: %v", err)
+		}
+		if branch != "main" {
+			t.Errorf("Expected 'main', got %q", branch)
+		}
+	})
+
+	t.Run("audit_repository_fails_when_default_branch_not_main", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cmd := exec.Command("git", "init", "-b", "master")
+		cmd.Dir = tmpDir
+		_ = cmd.Run()
+		cmd = exec.Command("git", "remote", "add", "origin", "https://github.com/Cooper-Wallace/repokit.git")
+		cmd.Dir = tmpDir
+		_ = cmd.Run()
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit" {
+				data := map[string]interface{}{
+					"default_branch":              "master",
+					"allow_squash_merge":          true,
+					"allow_merge_commit":          false,
+					"allow_rebase_merge":          false,
+					"delete_branch_on_merge":      true,
+					"squash_merge_commit_title":   "PR_TITLE",
+					"squash_merge_commit_message": "PR_BODY",
+					"allow_auto_merge":            false,
+				}
+				bytes, _ := json.Marshal(data)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/rulesets" {
+				rulesets := []map[string]interface{}{
+					{
+						"name":        "default-branch-protection",
+						"enforcement": "active",
+						"rules": []map[string]interface{}{
+							{
+								"type": "required_status_checks",
+								"parameters": map[string]interface{}{
+									"required_status_checks": []map[string]string{
+										{"context": "Test & Coverage"},
+									},
+								},
+							},
+						},
+					},
+				}
+				bytes, _ := json.Marshal(rulesets)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/actions/permissions/workflow" {
+				return `{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": true}`, "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		passed, err := AuditRepository(tmpDir, "", false, true)
+		if err != nil {
+			t.Fatalf("AuditRepository returned unexpected error: %v", err)
+		}
+		if passed {
+			t.Errorf("Expected AuditRepository to fail when default branch is master, but passed=true")
+		}
+	})
+
+	t.Run("audit_repository_passes_when_default_branch_is_main", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cmd := exec.Command("git", "init", "-b", "main")
+		cmd.Dir = tmpDir
+		_ = cmd.Run()
+		cmd = exec.Command("git", "remote", "add", "origin", "https://github.com/Cooper-Wallace/repokit.git")
+		cmd.Dir = tmpDir
+		_ = cmd.Run()
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit" {
+				data := map[string]interface{}{
+					"default_branch":              "main",
+					"allow_squash_merge":          true,
+					"allow_merge_commit":          false,
+					"allow_rebase_merge":          false,
+					"delete_branch_on_merge":      true,
+					"squash_merge_commit_title":   "PR_TITLE",
+					"squash_merge_commit_message": "PR_BODY",
+					"allow_auto_merge":            false,
+				}
+				bytes, _ := json.Marshal(data)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/rulesets" {
+				rulesets := []map[string]interface{}{
+					{
+						"name":        "default-branch-protection",
+						"enforcement": "active",
+						"rules": []map[string]interface{}{
+							{
+								"type": "required_status_checks",
+								"parameters": map[string]interface{}{
+									"required_status_checks": []map[string]string{
+										{"context": "Test & Coverage"},
+									},
+								},
+							},
+						},
+					},
+				}
+				bytes, _ := json.Marshal(rulesets)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/actions/permissions/workflow" {
+				return `{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": true}`, "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		passed, err := AuditRepository(tmpDir, "", false, true)
+		if err != nil || !passed {
+			t.Errorf("Expected AuditRepository to pass when default branch is main, got passed=%v, err=%v", passed, err)
 		}
 	})
 }
