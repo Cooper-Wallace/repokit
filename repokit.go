@@ -1883,6 +1883,9 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 					prBody := "Automated sync of repository governance, GitHub Actions workflows, and project templates via repokit configuration engine."
 					prOut, prErr, prCode, _ := RunCmd([]string{
 						"gh", "pr", "create",
+						"--repo", slug,
+						"--head", "chore/repokit-sync",
+						"--base", "main",
 						"--title", commitMsg,
 						"--body", prBody,
 					}, localPath)

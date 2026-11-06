@@ -1914,6 +1914,15 @@ func TestConfigureWithOptions(t *testing.T) {
 	oldRunner := CommandRunner
 	defer func() { CommandRunner = oldRunner }()
 
+	hasArgPair := func(cmdArgs []string, flag, expectedVal string) bool {
+		for i, a := range cmdArgs {
+			if a == flag && i+1 < len(cmdArgs) && cmdArgs[i+1] == expectedVal {
+				return true
+			}
+		}
+		return false
+	}
+
 	t.Run("backward_compatible_propagate_no_repos_specified", func(t *testing.T) {
 		err := PropagateRepositories(PropagateOptions{})
 		if err == nil {
@@ -2022,6 +2031,7 @@ func TestConfigureWithOptions(t *testing.T) {
 		var prCreated bool
 		var prAutoMerged bool
 		var gitRemoteSetURL bool
+		var prCreateArgs []string
 
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			if len(args) > 0 && args[0] == "git" {
@@ -2043,6 +2053,7 @@ func TestConfigureWithOptions(t *testing.T) {
 			}
 			if len(args) > 1 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
 				prCreated = true
+				prCreateArgs = args
 				return "https://github.com/user/repo-local/pull/1", "", 0, nil
 			}
 			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
@@ -2072,6 +2083,15 @@ func TestConfigureWithOptions(t *testing.T) {
 		if !prCreated {
 			t.Errorf("Expected gh pr create to be called")
 		}
+		if !hasArgPair(prCreateArgs, "--repo", "user/repo-local") {
+			t.Errorf("Expected --repo user/repo-local in gh pr create args, got: %v", prCreateArgs)
+		}
+		if !hasArgPair(prCreateArgs, "--head", "chore/repokit-sync") {
+			t.Errorf("Expected --head chore/repokit-sync in gh pr create args, got: %v", prCreateArgs)
+		}
+		if !hasArgPair(prCreateArgs, "--base", "main") {
+			t.Errorf("Expected --base main in gh pr create args, got: %v", prCreateArgs)
+		}
 		if !prAutoMerged {
 			t.Errorf("Expected gh pr merge ... --auto --squash to be called")
 		}
@@ -2096,6 +2116,7 @@ func TestConfigureWithOptions(t *testing.T) {
 		_ = cConfigE.Run()
 
 		var prAutoMergedExisting bool
+		var prCreateExistingArgs []string
 
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			if len(args) > 0 && args[0] == "git" {
@@ -2110,6 +2131,7 @@ func TestConfigureWithOptions(t *testing.T) {
 				return defaultCommandRunner(args, dir, input)
 			}
 			if len(args) > 1 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
+				prCreateExistingArgs = args
 				return "", "a pull request for branch \"chore/repokit-sync\" into branch \"main\" already exists", 1, nil
 			}
 			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
@@ -2126,6 +2148,15 @@ func TestConfigureWithOptions(t *testing.T) {
 		})
 		if err != nil {
 			t.Fatalf("ConfigureWithOptions local failed: %v", err)
+		}
+		if !hasArgPair(prCreateExistingArgs, "--repo", "user/repo-local-exist") {
+			t.Errorf("Expected --repo user/repo-local-exist in gh pr create args, got: %v", prCreateExistingArgs)
+		}
+		if !hasArgPair(prCreateExistingArgs, "--head", "chore/repokit-sync") {
+			t.Errorf("Expected --head chore/repokit-sync in gh pr create args, got: %v", prCreateExistingArgs)
+		}
+		if !hasArgPair(prCreateExistingArgs, "--base", "main") {
+			t.Errorf("Expected --base main in gh pr create args, got: %v", prCreateExistingArgs)
 		}
 		if !prAutoMergedExisting {
 			t.Errorf("Expected gh pr merge --auto --squash to be called when PR already exists")
@@ -2317,6 +2348,7 @@ func TestConfigureWithOptions(t *testing.T) {
 		// Intentionally do NOT configure user.name and user.email in repoA
 
 		var setUserName, setUserEmail bool
+		var prCreateArgs []string
 
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			if len(args) >= 6 && args[0] == "git" && args[3] == "config" {
@@ -2342,6 +2374,7 @@ func TestConfigureWithOptions(t *testing.T) {
 				return defaultCommandRunner(args, dir, input)
 			}
 			if len(args) > 1 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
+				prCreateArgs = args
 				return "https://github.com/user/repo-no-ident/pull/1", "", 0, nil
 			}
 			if len(args) > 2 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
@@ -2363,6 +2396,15 @@ func TestConfigureWithOptions(t *testing.T) {
 		}
 		if !setUserEmail {
 			t.Errorf("Expected git user.email to be configured as 41898282+github-actions[bot]@users.noreply.github.com")
+		}
+		if !hasArgPair(prCreateArgs, "--repo", "user/repo-no-ident") {
+			t.Errorf("Expected --repo user/repo-no-ident in gh pr create args, got: %v", prCreateArgs)
+		}
+		if !hasArgPair(prCreateArgs, "--head", "chore/repokit-sync") {
+			t.Errorf("Expected --head chore/repokit-sync in gh pr create args, got: %v", prCreateArgs)
+		}
+		if !hasArgPair(prCreateArgs, "--base", "main") {
+			t.Errorf("Expected --base main in gh pr create args, got: %v", prCreateArgs)
 		}
 	})
 }
