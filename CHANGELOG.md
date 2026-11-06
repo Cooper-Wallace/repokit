@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1 (2026-11-06)
+
+### Bug Fixes
+
+* **ruleset:** align branch protection status checks for reusable workflow callers (#20) (dca1233)
+
 ## 1.1.0 (2026-11-05)
 
 ### Features
