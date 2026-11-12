@@ -2,16 +2,20 @@ package repokit
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -316,14 +320,39 @@ func defaultCommandRunner(args []string, dir string, input string) (string, stri
 	return stdout, stderr, exitCode, err
 }
 
-var CommandRunner CommandRunnerFunc = defaultCommandRunner
+var (
+	mockRunnerMu  sync.Mutex
+	CommandRunner CommandRunnerFunc = defaultCommandRunner
+)
 
 func RunCmd(args []string, dir string) (string, string, int, error) {
+	if isCommandRunnerMocked() {
+		mockRunnerMu.Lock()
+		defer mockRunnerMu.Unlock()
+	}
 	return CommandRunner(args, dir, "")
 }
 
 func RunCmdWithInput(args []string, dir string, input string) (string, string, int, error) {
+	if isCommandRunnerMocked() {
+		mockRunnerMu.Lock()
+		defer mockRunnerMu.Unlock()
+	}
 	return CommandRunner(args, dir, input)
+}
+
+func isCommandRunnerMocked() bool {
+	return CommandRunner != nil && reflect.ValueOf(CommandRunner).Pointer() != reflect.ValueOf(defaultCommandRunner).Pointer()
+}
+
+// SetGitHubLatestReleaseURLForTesting overrides the release endpoint for testing purposes.
+func SetGitHubLatestReleaseURLForTesting(u string) func() {
+	return setGitHubLatestReleaseURL(u)
+}
+
+// SetConnectivityURLForTesting temporarily overrides the connectivity URL for testing.
+func SetConnectivityURLForTesting(u string) func() {
+	return setConnectivityURL(u)
 }
 
 // File system helpers
@@ -560,7 +589,7 @@ func ApplyArchetypeTemplate(templateName string, targetDir string, variables map
 			perm = 0755
 		}
 
-		return os.WriteFile(destPath, []byte(content), perm)
+		return WriteFileAtomic(destPath, []byte(content), perm)
 	})
 
 	if err != nil {
@@ -805,7 +834,7 @@ func InstallCommitHook(repoRoot string) error {
 		LogError("Failed to install git hook: %v", err)
 		return err
 	}
-	if err := os.WriteFile(hookPath, []byte(CommitMsgHook), 0755); err != nil {
+	if err := WriteFileAtomic(hookPath, []byte(CommitMsgHook), 0755); err != nil {
 		LogError("Failed to install git hook: %v", err)
 		return err
 	}
@@ -832,7 +861,7 @@ func InstallPreCommitHook(repoRoot string) error {
 		binPath = filepath.Join(os.Getenv("HOME"), ".local", "bin", "repokit")
 	}
 	hookContent := strings.ReplaceAll(PreCommitHook, "{bin_path}", binPath)
-	if err := os.WriteFile(hookPath, []byte(hookContent), 0755); err != nil {
+	if err := WriteFileAtomic(hookPath, []byte(hookContent), 0755); err != nil {
 		LogError("Failed to install git pre-commit hook: %v", err)
 		return err
 	}
@@ -862,7 +891,7 @@ func ScaffoldTemplates(repoRoot string, force bool) error {
 		if err := os.MkdirAll(filepath.Dir(prTemplatePath), 0755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(prTemplatePath, []byte(PRTemplate), 0644); err != nil {
+		if err := WriteFileAtomic(prTemplatePath, []byte(PRTemplate), 0644); err != nil {
 			return err
 		}
 		LogSuccess("Scaffolded .github/pull_request_template.md")
@@ -875,7 +904,7 @@ func ScaffoldTemplates(repoRoot string, force bool) error {
 		if err := os.MkdirAll(filepath.Dir(workflowPath), 0755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(workflowPath, []byte(WorkflowSemanticPR), 0644); err != nil {
+		if err := WriteFileAtomic(workflowPath, []byte(WorkflowSemanticPR), 0644); err != nil {
 			return err
 		}
 		LogSuccess("Scaffolded .github/workflows/semantic-pr.yml")
@@ -980,7 +1009,7 @@ func PatchCIWorkflowPRGuard(ciFile string) (bool, error) {
 
 	if modified {
 		newContent := strings.Join(lines, "\n")
-		if err := os.WriteFile(ciFile, []byte(newContent), 0644); err != nil {
+		if err := WriteFileAtomic(ciFile, []byte(newContent), 0644); err != nil {
 			return false, err
 		}
 		LogSuccess("Patched existing CI workflow (.github/workflows/ci.yml)")
@@ -1018,7 +1047,7 @@ func ScaffoldArchetypeCI(repoRoot string, force bool) (bool, error) {
 		}
 		content := string(templateData)
 		content = strings.ReplaceAll(content, "{{governance_slug}}", DefaultGovernanceRepo)
-		if err := os.WriteFile(targetCI, []byte(content), 0644); err != nil {
+		if err := WriteFileAtomic(targetCI, []byte(content), 0644); err != nil {
 			return false, err
 		}
 		LogSuccess("Scaffolded CI workflow calling central repokit workflows (.github/workflows/ci.yml)")
@@ -1057,7 +1086,7 @@ func ScaffoldReleaseWorkflow(repoRoot string, force bool) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(targetRelease), 0755); err != nil {
 		return false, err
 	}
-	if err := os.WriteFile(targetRelease, []byte(content), 0644); err != nil {
+	if err := WriteFileAtomic(targetRelease, []byte(content), 0644); err != nil {
 		return false, err
 	}
 	LogSuccess("Scaffolded release workflow (.github/workflows/release.yml)")
@@ -1070,7 +1099,7 @@ func ScaffoldReleaseWorkflow(repoRoot string, force bool) (bool, error) {
 				gContent := string(data)
 				gContent = strings.ReplaceAll(gContent, "{{repo_name}}", filepath.Base(repoRoot))
 				gContent = strings.ReplaceAll(gContent, "{{governance_slug}}", DefaultGovernanceRepo)
-				if err := os.WriteFile(targetGoreleaser, []byte(gContent), 0644); err != nil {
+				if err := WriteFileAtomic(targetGoreleaser, []byte(gContent), 0644); err != nil {
 					return false, err
 				}
 				LogSuccess("Scaffolded GoReleaser configuration (.goreleaser.yaml)")
@@ -1082,8 +1111,27 @@ func ScaffoldReleaseWorkflow(repoRoot string, force bool) (bool, error) {
 }
 
 // Audit Engine
-func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOnly bool) (bool, error) {
+func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOnly bool, offline ...bool) (bool, error) {
 	fmt.Printf("\n%sAuditing Repository Standards:%s %s\n\n", Bold, Reset, repoRoot)
+
+	isOffline := len(offline) > 0 && offline[0]
+	if !isOffline {
+		isOffline = IsOfflineMode()
+	}
+	if !isOffline && !isCommandRunnerMocked() {
+		if !CheckGitHubConnectivity(1500 * time.Millisecond) {
+			isOffline = true
+		}
+	}
+
+	if isOffline {
+		LogWarn("Offline mode: skipping remote GitHub checks.")
+		if remoteOnly {
+			return false, fmt.Errorf("cannot perform remote-only audit in offline mode")
+		}
+		remoteOnly = false
+		localOnly = true
+	}
 
 	runLocal := true
 	runRemote := true
@@ -1480,8 +1528,8 @@ func CreateRepository(name string, description string, public bool, templateType
 		readmeContent := strings.ReplaceAll(DefaultReadme, "{repo_name}", name)
 		readmeContent = strings.ReplaceAll(readmeContent, "{description}", desc)
 		readmeContent = strings.ReplaceAll(readmeContent, "{repo_slug}", slug)
-		_ = os.WriteFile(filepath.Join(absPath, "README.md"), []byte(readmeContent), 0644)
-		_ = os.WriteFile(filepath.Join(absPath, ".gitignore"), []byte(DefaultGitignore), 0644)
+		_ = WriteFileAtomic(filepath.Join(absPath, "README.md"), []byte(readmeContent), 0644)
+		_ = WriteFileAtomic(filepath.Join(absPath, ".gitignore"), []byte(DefaultGitignore), 0644)
 	}
 
 	_ = ScaffoldTemplates(absPath, true)
@@ -1537,6 +1585,8 @@ type ConfigureOptions struct {
 	ReleaseRef   string        // release reference tag (e.g. "v1.1.0"), defaults to "latest" if empty
 	WaitForMerge bool          // wait for downstream synchronization PRs to auto-merge
 	MergeTimeout time.Duration // timeout for downstream PR auto-merge verification
+	Concurrency  int           // concurrent worker pool size (default 4; clamp 1..16)
+	Offline      bool          // offline mode: skip remote GitHub API checks/probes
 }
 
 type SyncPRInfo struct {
@@ -1566,6 +1616,17 @@ func PropagateRepositories(opts PropagateOptions) error {
 
 // ConfigureWithOptions applies repository standards to a single repo or across discovered repos.
 func ConfigureWithOptions(opts ConfigureOptions) error {
+	isOffline := opts.Offline || IsOfflineMode()
+	if !isOffline && !isCommandRunnerMocked() {
+		if !CheckGitHubConnectivity(1500 * time.Millisecond) {
+			isOffline = true
+		}
+	}
+	if isOffline {
+		opts.Offline = true
+		LogWarn("Offline mode: skipping remote GitHub checks.")
+	}
+
 	if opts.All || len(opts.Repos) > 0 || opts.Local {
 		return configureMultipleRepositories(opts)
 	}
@@ -1598,18 +1659,24 @@ func configureSingleRepository(opts ConfigureOptions) error {
 	if IsVaultOrExemptRepo(slug) {
 		LogInfo("Skipping branch protection ruleset and CI scaffolding for exempt vault repository %s", slug)
 		if opts.DryRun {
-			LogInfo("[DRY RUN] Would apply remote GitHub repo settings to %s", slug)
+			if !opts.Offline {
+				LogInfo("[DRY RUN] Would apply remote GitHub repo settings to %s", slug)
+			}
 			return nil
 		}
-		_ = ApplyGitHubRepoSettings(slug)
+		if !opts.Offline {
+			_ = ApplyGitHubRepoSettings(slug)
+		}
 		LogSuccess("Repository configuration complete!")
 		return nil
 	}
 
 	if opts.DryRun {
-		LogInfo("[DRY RUN] Would apply remote GitHub repo settings to %s", slug)
-		LogInfo("[DRY RUN] Would apply workflow permissions to %s", slug)
-		LogInfo("[DRY RUN] Would apply branch protection ruleset to %s", slug)
+		if !opts.Offline {
+			LogInfo("[DRY RUN] Would apply remote GitHub repo settings to %s", slug)
+			LogInfo("[DRY RUN] Would apply workflow permissions to %s", slug)
+			LogInfo("[DRY RUN] Would apply branch protection ruleset to %s", slug)
+		}
 		LogInfo("[DRY RUN] Would configure local repository at %s (force=%v)", repoRoot, opts.Force)
 		if opts.DirectCommit {
 			LogInfo("[DRY RUN] Would check git status and commit directly to main at %s if changes exist", repoRoot)
@@ -1621,9 +1688,11 @@ func configureSingleRepository(opts ConfigureOptions) error {
 
 	fmt.Printf("%sConfiguring Repository:%s %s (%s)\n\n", Bold, Reset, slug, repoRoot)
 
-	_ = ApplyGitHubRepoSettings(slug)
-	_ = ApplyWorkflowPermissions(slug)
-	_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil)
+	if !opts.Offline {
+		_ = ApplyGitHubRepoSettings(slug)
+		_ = ApplyWorkflowPermissions(slug)
+		_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil)
+	}
 	_ = InstallHooks(repoRoot, true)
 	_ = ScaffoldTemplates(repoRoot, opts.Force)
 	_, _ = ScaffoldArchetypeCI(repoRoot, opts.Force)
@@ -1718,7 +1787,6 @@ func configureSingleRepository(opts ConfigureOptions) error {
 }
 
 func configureMultipleRepositories(opts ConfigureOptions) error {
-	var pendingPRs []SyncPRInfo
 	localBaseDir := opts.LocalDir
 	if localBaseDir == "" {
 		home := os.Getenv("HOME")
@@ -1825,13 +1893,19 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 
 	LogInfo("Configuring standards across %d repositories...", len(targetSlugs))
 
-	for _, slug := range targetSlugs {
-		fmt.Println()
+	configureRepoTarget := func(slug string) (*SyncPRInfo, error) {
+		SynchronizedLog(func() {
+			fmt.Println()
+		})
 		if IsVaultOrExemptRepo(slug) {
-			LogInfo("Skipping branch protection ruleset and CI scaffolding for exempt vault repository %s", slug)
-			continue
+			SynchronizedLog(func() {
+				LogInfo("Skipping branch protection ruleset and CI scaffolding for exempt vault repository %s", slug)
+			})
+			return nil, nil
 		}
-		LogInfo("Configuring repository standards for %s...", slug)
+		SynchronizedLog(func() {
+			LogInfo("Configuring repository standards for %s...", slug)
+		})
 
 		// Determine local repository path if exists
 		localPath := slugToLocalPath[slug]
@@ -1847,43 +1921,59 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 
 		defaultBranch, _ := GetRepoDefaultBranch(slug, localPath)
 		if defaultBranch != "" && defaultBranch != "main" {
-			LogWarn("[%s] Non-standard default branch detected: '%s' (expected 'main').", slug, defaultBranch)
+			SynchronizedLog(func() {
+				LogWarn("[%s] Non-standard default branch detected: '%s' (expected 'main').", slug, defaultBranch)
+			})
 		}
 
 		if opts.DryRun {
-			LogInfo("[DRY RUN] Would apply remote GitHub repo settings to %s", slug)
-			LogInfo("[DRY RUN] Would apply workflow permissions to %s", slug)
-			LogInfo("[DRY RUN] Would apply branch protection ruleset to %s", slug)
-			if localPath != "" {
-				LogInfo("[DRY RUN] Would configure local repository at %s (force=%v)", localPath, opts.Force)
-				if opts.DirectCommit {
-					LogInfo("[DRY RUN] Would check git status and commit directly to main at %s if changes exist", localPath)
-				} else if opts.CreatePR {
-					LogInfo("[DRY RUN] Would check git status and create PR on bot/repokit-sync at %s if changes exist", localPath)
+			SynchronizedLog(func() {
+				if !opts.Offline {
+					LogInfo("[DRY RUN] Would apply remote GitHub repo settings to %s", slug)
+					LogInfo("[DRY RUN] Would apply workflow permissions to %s", slug)
+					LogInfo("[DRY RUN] Would apply branch protection ruleset to %s", slug)
 				}
-			}
-			continue
+				if localPath != "" {
+					LogInfo("[DRY RUN] Would configure local repository at %s (force=%v)", localPath, opts.Force)
+					if opts.DirectCommit {
+						LogInfo("[DRY RUN] Would check git status and commit directly to main at %s if changes exist", localPath)
+					} else if opts.CreatePR {
+						LogInfo("[DRY RUN] Would check git status and create PR on bot/repokit-sync at %s if changes exist", localPath)
+					}
+				}
+			})
+			return nil, nil
 		}
 
 		// 1. Remote GitHub settings
-		if err := ApplyGitHubRepoSettings(slug); err != nil {
-			LogWarn("Failed to apply GitHub repo settings for %s: %v", slug, err)
-		}
-		if err := ApplyWorkflowPermissions(slug); err != nil {
-			LogWarn("Failed to apply workflow permissions for %s: %v", slug, err)
-		}
-		if err := ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil); err != nil {
-			LogWarn("Failed to apply branch ruleset for %s: %v", slug, err)
+		if !opts.Offline {
+			if err := ApplyGitHubRepoSettings(slug); err != nil {
+				SynchronizedLog(func() {
+					LogWarn("Failed to apply GitHub repo settings for %s: %v", slug, err)
+				})
+			}
+			if err := ApplyWorkflowPermissions(slug); err != nil {
+				SynchronizedLog(func() {
+					LogWarn("Failed to apply workflow permissions for %s: %v", slug, err)
+				})
+			}
+			if err := ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil); err != nil {
+				SynchronizedLog(func() {
+					LogWarn("Failed to apply branch ruleset for %s: %v", slug, err)
+				})
+			}
 		}
 
 		isHub := strings.EqualFold(slug, DefaultGovernanceRepo) || strings.EqualFold(slug, "Cooper-Wallace/repokit") || strings.HasSuffix(strings.ToLower(slug), "/repokit")
 		if isHub {
-			LogInfo("Repository %s is the central governance hub; skipping downstream sync branch and PR creation.", slug)
-			continue
+			SynchronizedLog(func() {
+				LogInfo("Repository %s is the central governance hub; skipping downstream sync branch and PR creation.", slug)
+			})
+			return nil, nil
 		}
 
 		// Ephemeral clone for remote repos discovered without existing local clone
-		if localPath == "" {
+		if localPath == "" && !opts.Offline {
 			tempDir := filepath.Join(os.TempDir(), "repokit-sync", repoName)
 			_ = os.RemoveAll(tempDir)
 			_ = os.MkdirAll(filepath.Dir(tempDir), 0755)
@@ -1892,7 +1982,9 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 			if cloneCode == 0 {
 				localPath = tempDir
 			} else {
-				LogWarn("Failed to clone %s ephemerally: %s", slug, strings.TrimSpace(cloneErr))
+				SynchronizedLog(func() {
+					LogWarn("Failed to clone %s ephemerally: %s", slug, strings.TrimSpace(cloneErr))
+				})
 			}
 		}
 
@@ -1912,13 +2004,17 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 			ensureGitAuthorIdentity(localPath)
 
 			if err := ConfigureRepository(localPath, opts.Force); err != nil {
-				LogWarn("Failed to configure local repository at %s: %v", localPath, err)
+				SynchronizedLog(func() {
+					LogWarn("Failed to configure local repository at %s: %v", localPath, err)
+				})
 			}
 
 			statusOut, _, _, _ := RunCmd([]string{"git", "-C", localPath, "status", "--porcelain"}, "")
 			if strings.TrimSpace(statusOut) != "" {
 				if opts.DirectCommit {
-					LogInfo("Applying direct governance commit to main for %s...", slug)
+					SynchronizedLog(func() {
+						LogInfo("Applying direct governance commit to main for %s...", slug)
+					})
 					RunCmd([]string{"git", "-C", localPath, "checkout", "main"}, "")
 					RunCmd([]string{"git", "-C", localPath, "add", "-A"}, "")
 					refStr := opts.ReleaseRef
@@ -1929,31 +2025,45 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 					RunCmd([]string{"git", "-C", localPath, "commit", "-m", commitMsg}, "")
 					_, pushErr, pushCode, _ := RunCmd([]string{"git", "-C", localPath, "push", "origin", "main"}, "")
 					if pushCode == 0 {
-						LogSuccess("Directly committed governance standards to main on %s", slug)
+						SynchronizedLog(func() {
+							LogSuccess("Directly committed governance standards to main on %s", slug)
+						})
 					} else {
-						LogWarn("Failed to push direct commit to %s: %s", slug, strings.TrimSpace(pushErr))
+						SynchronizedLog(func() {
+							LogWarn("Failed to push direct commit to %s: %s", slug, strings.TrimSpace(pushErr))
+						})
 					}
 				} else if opts.CreatePR {
-					LogInfo("Detected modified files in %s, creating PR...", localPath)
+					SynchronizedLog(func() {
+						LogInfo("Detected modified files in %s, creating PR...", localPath)
+					})
 					_, stderr, code, _ := RunCmd([]string{"git", "-C", localPath, "checkout", "-B", "bot/repokit-sync"}, "")
 					if code != 0 {
-						LogWarn("Failed to checkout branch bot/repokit-sync in %s: %s", localPath, strings.TrimSpace(stderr))
-						continue
+						SynchronizedLog(func() {
+							LogWarn("Failed to checkout branch bot/repokit-sync in %s: %s", localPath, strings.TrimSpace(stderr))
+						})
+						return nil, nil
 					}
 					_, stderr, code, _ = RunCmd([]string{"git", "-C", localPath, "add", "-A"}, "")
 					if code != 0 {
-						LogWarn("Failed to stage changes in %s: %s", localPath, strings.TrimSpace(stderr))
-						continue
+						SynchronizedLog(func() {
+							LogWarn("Failed to stage changes in %s: %s", localPath, strings.TrimSpace(stderr))
+						})
+						return nil, nil
 					}
 					prTitle := "ci(repokit): automated sync of governance standards and workflows"
 					_, stderr, code, _ = RunCmd([]string{"git", "-C", localPath, "commit", "-m", prTitle}, "")
 					if code != 0 {
-						LogWarn("Failed to commit changes in %s: %s", localPath, strings.TrimSpace(stderr))
-						continue
+						SynchronizedLog(func() {
+							LogWarn("Failed to commit changes in %s: %s", localPath, strings.TrimSpace(stderr))
+						})
+						return nil, nil
 					}
 					_, stderr, code, _ = RunCmd([]string{"git", "-C", localPath, "push", "-u", "origin", "bot/repokit-sync", "--force"}, "")
 					if code != 0 {
-						LogWarn("Failed to push bot/repokit-sync for %s: %s", slug, strings.TrimSpace(stderr))
+						SynchronizedLog(func() {
+							LogWarn("Failed to push bot/repokit-sync for %s: %s", slug, strings.TrimSpace(stderr))
+						})
 					}
 					prBody := buildSyncPRBody(opts.ReleaseRef)
 					prOut, prErr, prCode, _ := RunCmd([]string{
@@ -1964,27 +2074,71 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 						"--body", prBody,
 					}, localPath)
 					if prCode == 0 || strings.Contains(strings.ToLower(prErr), "a pull request") || strings.Contains(strings.ToLower(prOut), "a pull request") || strings.Contains(strings.ToLower(prErr), "already exists") {
-						if prCode == 0 {
-							LogSuccess("Created PR for %s: %s", slug, strings.TrimSpace(prOut))
-						} else {
-							LogInfo("PR for %s already exists.", slug)
-						}
+						SynchronizedLog(func() {
+							if prCode == 0 {
+								LogSuccess("Created PR for %s: %s", slug, strings.TrimSpace(prOut))
+							} else {
+								LogInfo("PR for %s already exists.", slug)
+							}
+						})
 						RunCmd([]string{"gh", "pr", "merge", "bot/repokit-sync", "--auto", "--squash", "--delete-branch", "--repo", slug}, localPath)
-						LogInfo("Enabled CI-gated auto-merge on bot/repokit-sync for %s", slug)
-						pendingPRs = append(pendingPRs, SyncPRInfo{
+						SynchronizedLog(func() {
+							LogInfo("Enabled CI-gated auto-merge on bot/repokit-sync for %s", slug)
+						})
+						return &SyncPRInfo{
 							Slug:   slug,
 							Branch: "bot/repokit-sync",
-						})
+						}, nil
 					} else {
-						LogWarn("gh pr create for %s: %s", slug, strings.TrimSpace(prErr))
+						SynchronizedLog(func() {
+							LogWarn("gh pr create for %s: %s", slug, strings.TrimSpace(prErr))
+						})
 					}
 				}
 			} else {
-				if opts.DirectCommit {
-					LogInfo("No local modifications detected in %s; skipping direct commit.", localPath)
-				} else if opts.CreatePR {
-					LogInfo("No local modifications detected in %s; skipping PR creation.", localPath)
-				}
+				SynchronizedLog(func() {
+					if opts.DirectCommit {
+						LogInfo("No local modifications detected in %s; skipping direct commit.", localPath)
+					} else if opts.CreatePR {
+						LogInfo("No local modifications detected in %s; skipping PR creation.", localPath)
+					}
+				})
+			}
+		}
+		return nil, nil
+	}
+
+	concurrency := opts.Concurrency
+	if concurrency <= 0 {
+		concurrency = 4
+	} else if concurrency > 16 {
+		concurrency = 16
+	}
+
+	var pendingPRs []SyncPRInfo
+	var errs []error
+
+	if concurrency == 1 {
+		for _, slug := range targetSlugs {
+			prInfo, err := configureRepoTarget(slug)
+			if err != nil {
+				errs = append(errs, err)
+			}
+			if prInfo != nil {
+				pendingPRs = append(pendingPRs, *prInfo)
+			}
+		}
+	} else {
+		pool := NewWorkerPool(concurrency, func(ctx context.Context, slug string) (*SyncPRInfo, error) {
+			return configureRepoTarget(slug)
+		})
+		results := pool.Run(context.Background(), targetSlugs)
+		for _, res := range results {
+			if res.Err != nil {
+				errs = append(errs, res.Err)
+			}
+			if res.Value != nil {
+				pendingPRs = append(pendingPRs, *res.Value)
 			}
 		}
 	}
@@ -2016,6 +2170,9 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 
 	fmt.Println()
 	LogSuccess("Repository configuration complete across %d repositories!", len(targetSlugs))
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
 	return nil
 }
 
@@ -3042,7 +3199,7 @@ func ExecuteRelease(opts ReleaseOptions) (*ReleaseResult, error) {
 			return nil, fmt.Errorf("failed to checkout staging branch %s: %w", opts.StagingBranch, err)
 		}
 
-		if err := os.WriteFile(changelogPath, []byte(updatedChangelog), 0644); err != nil {
+		if err := WriteFileAtomic(changelogPath, []byte(updatedChangelog), 0644); err != nil {
 			return nil, fmt.Errorf("failed to write CHANGELOG.md: %w", err)
 		}
 

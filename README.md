@@ -43,6 +43,17 @@ For solo developers, engineers, and researchers, pushing directly to `main` with
   - Scaffolds structured PR templates (`.github/pull_request_template.md`), `.gitignore`, and portfolio-ready documentation.
 - **Multi-Mode Audit Engine**:
   - Audits existing repositories with offline local structure checks (`--local`, <30ms) or full remote GitHub API checks (`--remote`).
+- **In-Place Binary Self-Update**:
+  - Inspect and update `repokit` directly from GitHub Releases (`repokit update`) with `--check`, `--force`, and `--dry-run` modes.
+  - Automatically verifies SHA-256 checksums and replaces the running binary atomically.
+- **Bounded Concurrent Multi-Repo Governance**:
+  - Configure standards across multiple repositories in parallel using a type-safe generic worker pool (`--concurrency <N>`, bounded 1..16, default 4).
+  - Thread-safe synchronized console logging eliminates interleaved terminal output.
+- **Pre-Flight Network Awareness & Offline Degradation**:
+  - Probes GitHub connectivity (1500ms timeout) prior to API operations or honors `--offline` / `REPOKIT_OFFLINE=1`.
+  - Automatically degrades to local standards audit and scaffolding when offline, preventing hanging timeouts.
+- **Resilient Atomic File Operations**:
+  - Employs temporary staging, permission preservation, and atomic file renaming (`WriteFileAtomic`) across all templates, Git hooks, and changelog updates.
 
 ---
 
@@ -87,6 +98,9 @@ repokit audit
 
 # Run local offline audit only (<30ms, no GitHub API calls):
 repokit audit --local
+
+# Run offline audit with pre-flight network degradation:
+repokit audit --offline
 
 # Run remote GitHub settings audit only:
 repokit audit --remote
@@ -139,8 +153,14 @@ repokit configure -f
 # Discover and configure across all GitHub repositories:
 repokit configure --all
 
+# Configure across discovered repositories with bounded concurrency (e.g. 8 workers):
+repokit configure --all --concurrency 8
+
 # Configure across specific repositories:
 repokit configure --repos repo1,repo2
+
+# Configure local repositories in offline mode (skipping remote GitHub checks):
+repokit configure --local --offline
 
 # Dry-run mode (audit changes without applying):
 repokit configure --dry-run
@@ -162,6 +182,8 @@ Options:
 - `--dry-run`: Inspect actions and changes that would be applied without modifying remote settings or local files.
 - `--direct`, `--push-main`: Commit changes directly to `main` via ephemeral clones and bypass ruleset push restrictions (using administrative tokens), avoiding PR merge fatigue across downstream repositories.
 - `--release-ref <tag>`: Associate direct governance commits with a specific release tag (e.g. `v1.2.0`) in the commit message (`chore(repokit): sync governance standards and workflows to <tag>`).
+- `--concurrency <N>`: Bounded worker pool concurrency level for multi-repository configuration (1..16, defaults to 4). Concurrency of 1 executes serially.
+- `--offline`: Run in offline mode, bypassing remote GitHub API calls (rulesets, permissions, repository settings) and applying local standards only.
 - `--pr`: Create a pull request on branch `bot/repokit-sync` instead of pushing directly to `main`.
 ```
 
@@ -235,6 +257,30 @@ repokit release --dry-run
 - **Stage 2: Commit Inspection & Changelog Generation**: `repokit release` inspects Conventional Commits since the last `v*` tag, bumps SemVer (`fix` -> patch, `feat` -> minor, `BREAKING CHANGE` or `!` -> major), updates `CHANGELOG.md`, and creates or updates a candidate PR from `release-staging` to `main`.
 - **Stage 3: Human Review & Manual Squash-Merge**: Human review & manual squash-merge of `release-staging` PR into `main`. Direct bot auto-merging is disallowed to preserve human gatekeeping.
 - **Stage 4: Release Promotion & Asset Packaging**: On merge to `main`, `repokit release` promotes the release: tags `vX.Y.Z`, creates GitHub Release with release notes, and triggers packaging/asset uploads (`package-release`).
+
+---
+
+## 7. In-Place Binary Self-Update
+Inspect and update `repokit` directly from official GitHub Releases:
+
+```bash
+# Check if a newer version is available without downloading or replacing:
+repokit update --check
+
+# Dry-run update flow (displays target asset and checksums):
+repokit update --dry-run
+
+# Perform in-place download, SHA-256 verification, and atomic replacement:
+repokit update
+
+# Force re-installation of the latest release even if current version is up to date:
+repokit update --force
+```
+
+Flags:
+- `--check`: Query GitHub Releases for the latest release tag and compare against the local version without modifying files.
+- `--dry-run`: Simulate the update workflow, printing release version, download URL, and checksum details without writing files.
+- `--force`: Download, verify, and reinstall even if the current binary is already on the latest version.
 
 ---
 

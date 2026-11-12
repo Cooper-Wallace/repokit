@@ -1,6 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -176,6 +181,22 @@ func TestConfigureDiscoveryCLI(t *testing.T) {
 	if code := run([]string{"configure", "--dry-run", "--repos=r1", "--pr", "--wait-for-merge", "--merge-timeout=2m"}); code != 0 {
 		t.Errorf("Expected 0 for configure --dry-run --wait-for-merge --merge-timeout=..., got %d", code)
 	}
+
+	// Test --concurrency flags
+	if code := run([]string{"configure", "--dry-run", "--repos", "r1,r2", "--concurrency", "4"}); code != 0 {
+		t.Errorf("Expected 0 for configure --dry-run --concurrency 4, got %d", code)
+	}
+	if code := run([]string{"configure", "--dry-run", "--repos=r1,r2", "--concurrency=2"}); code != 0 {
+		t.Errorf("Expected 0 for configure --dry-run --concurrency=2, got %d", code)
+	}
+	if code := run([]string{"configure", "--dry-run", "--repos", "r1,r2", "--concurrency", "1"}); code != 0 {
+		t.Errorf("Expected 0 for configure --dry-run --concurrency 1, got %d", code)
+	}
+
+	// Test --offline flag
+	if code := run([]string{"configure", "--dry-run", "--repos", "r1,r2", "--offline"}); code != 0 {
+		t.Errorf("Expected 0 for configure --dry-run --offline, got %d", code)
+	}
 }
 
 func TestReleaseCLI(t *testing.T) {
@@ -248,5 +269,114 @@ func TestReleaseCLI(t *testing.T) {
 	repokit.CommandRunner = oldRunner
 	if code := run([]string{"release", nonGit}); code != 1 {
 		t.Errorf("Expected 1 for release on non-git directory, got %d", code)
+	}
+}
+
+func TestUpdateCLI(t *testing.T) {
+	// 1. Help flag
+	if code := run([]string{"update", "--help"}); code != 0 {
+		t.Errorf("Expected 0 for update --help, got %d", code)
+	}
+	if code := run([]string{"update", "-h"}); code != 0 {
+		t.Errorf("Expected 0 for update -h, got %d", code)
+	}
+
+	// 2. Invalid flag
+	if code := run([]string{"update", "--invalid-flag-xyz"}); code != 1 {
+		t.Errorf("Expected 1 for invalid flag, got %d", code)
+	}
+
+	// 3. Mock GitHub release server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"tag_name": "v9.9.9",
+			"assets": []map[string]string{
+				{
+					"name":                 fmt.Sprintf("repokit_9.9.9_%s_%s.tar.gz", repokit.GetPlatformOS(), repokit.GetPlatformArch()),
+					"browser_download_url": "http://example.com/asset.tar.gz",
+				},
+				{
+					"name":                 "checksums.txt",
+					"browser_download_url": "http://example.com/checksums.txt",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cleanup := repokit.SetGitHubLatestReleaseURLForTesting(server.URL)
+	defer cleanup()
+
+	// Dry run with update available
+	if code := run([]string{"update", "--dry-run"}); code != 0 {
+		t.Errorf("Expected 0 for update --dry-run, got %d", code)
+	}
+
+	// Check only
+	if code := run([]string{"update", "--check"}); code != 0 {
+		t.Errorf("Expected 0 for update --check, got %d", code)
+	}
+
+	// Combined check and dry-run
+	if code := run([]string{"update", "--check", "--dry-run"}); code != 0 {
+		t.Errorf("Expected 0 for update --check --dry-run, got %d", code)
+	}
+
+	// Force flag with dry-run
+	if code := run([]string{"update", "--force", "--dry-run"}); code != 0 {
+		t.Errorf("Expected 0 for update --force --dry-run, got %d", code)
+	}
+
+	// 4. Test network error handling gracefully
+	closedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	closedURL := closedServer.URL
+	closedServer.Close()
+
+	cleanupClosed := repokit.SetGitHubLatestReleaseURLForTesting(closedURL)
+	defer cleanupClosed()
+
+	if code := run([]string{"update", "--check", "--dry-run"}); code != 1 {
+		t.Errorf("Expected 1 for update with unreachable network, got %d", code)
+	}
+}
+
+func TestAuditOfflineCLI(t *testing.T) {
+	tmpDir := t.TempDir()
+	cmd := exec.Command("git", "init", "-b", "main")
+	cmd.Dir = tmpDir
+	_ = cmd.Run()
+
+	// Scaffold templates and hooks so local standards pass
+	_ = repokit.InstallHooks(tmpDir, true)
+	_ = repokit.ScaffoldTemplates(tmpDir, true)
+	_, _ = repokit.ScaffoldReleaseWorkflow(tmpDir, true)
+	ciDir := filepath.Join(tmpDir, ".github", "workflows")
+	_ = os.MkdirAll(ciDir, 0755)
+	ciContent := `name: CI
+jobs:
+  validate-pr:
+    if: github.event_name == 'pull_request'
+    uses: Cooper-Wallace/repokit/.github/workflows/semantic-pr.yml@main
+  ci:
+    uses: Cooper-Wallace/repokit/.github/workflows/reusable-python.yml@main
+`
+	_ = os.WriteFile(filepath.Join(ciDir, "ci.yml"), []byte(ciContent), 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "src"), 0755)
+
+	// Audit with --offline: should run local checks and succeed without contacting remote GitHub
+	if code := run([]string{"audit", "--offline", tmpDir}); code != 0 {
+		t.Errorf("Expected 0 for audit --offline on configured repo, got %d", code)
+	}
+
+	// Audit with --offline and --local: should succeed
+	if code := run([]string{"audit", "--offline", "--local", tmpDir}); code != 0 {
+		t.Errorf("Expected 0 for audit --offline --local, got %d", code)
+	}
+
+	// Audit with --offline and --remote: must fail with error because remote audit cannot run offline
+	if code := run([]string{"audit", "--offline", "--remote", tmpDir}); code != 1 {
+		t.Errorf("Expected 1 for audit --offline --remote, got %d", code)
 	}
 }
