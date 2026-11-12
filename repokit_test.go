@@ -3722,6 +3722,14 @@ func TestWaitForSyncPRs(t *testing.T) {
 						data, _ := json.Marshal(resp)
 						return string(data), "", 0, nil
 					}
+					if len(args) >= 3 && args[0] == "gh" && args[1] == "issue" {
+						if args[2] == "list" {
+							return "[]", "", 0, nil
+						}
+						if args[2] == "create" {
+							return "https://github.com/org/repo-fail/issues/77\n", "", 0, nil
+						}
+					}
 					return defaultCommandRunner(args, dir, input)
 				}
 
@@ -3734,6 +3742,15 @@ func TestWaitForSyncPRs(t *testing.T) {
 				}
 				if len(res) > 0 && res[0].PRNumber != 55 {
 					t.Errorf("Expected PR number 55 populated, got %d", res[0].PRNumber)
+				}
+				if len(res) > 0 && res[0].IssueNumber != 77 {
+					t.Errorf("Expected issue number 77 populated, got %d", res[0].IssueNumber)
+				}
+				if len(res) > 0 && res[0].IssueURL != "https://github.com/org/repo-fail/issues/77" {
+					t.Errorf("Expected issue URL populated, got %s", res[0].IssueURL)
+				}
+				if !strings.Contains(err.Error(), "https://github.com/org/repo-fail/issues/77") {
+					t.Errorf("Expected error to contain issue link, got: %v", err)
 				}
 			})
 		}
@@ -3794,6 +3811,348 @@ func TestWaitForSyncPRs(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "org/repo-slow") {
 			t.Errorf("Expected error to mention org/repo-slow, got: %v", err)
+		}
+	})
+
+	t.Run("fast_fail_when_all_prs_reach_terminal_status", func(t *testing.T) {
+		prs := []SyncPRInfo{
+			{Slug: "org/repo-merged", Branch: "bot/repokit-sync"},
+			{Slug: "org/repo-failed", Branch: "bot/repokit-sync"},
+		}
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 6 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" {
+				slug := args[5]
+				if slug == "org/repo-merged" {
+					resp := ghPRViewOutput{
+						Number: 101,
+						URL:    "https://github.com/org/repo-merged/pull/101",
+						State:  "MERGED",
+					}
+					data, _ := json.Marshal(resp)
+					return string(data), "", 0, nil
+				}
+				if slug == "org/repo-failed" {
+					resp := ghPRViewOutput{
+						Number: 102,
+						URL:    "https://github.com/org/repo-failed/pull/102",
+						State:  "OPEN",
+						StatusCheckRollup: []ghStatusCheckEntry{
+							{
+								Name:       "CI",
+								Status:     "COMPLETED",
+								Conclusion: "FAILURE",
+								DetailsURL: "https://github.com/org/repo-failed/actions/runs/999",
+							},
+						},
+					}
+					data, _ := json.Marshal(resp)
+					return string(data), "", 0, nil
+				}
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "issue" {
+				if args[2] == "list" {
+					return "[]", "", 0, nil
+				}
+				if args[2] == "create" {
+					return "https://github.com/org/repo-failed/issues/42\n", "", 0, nil
+				}
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		start := time.Now()
+		// Timeout is large (10s), but fast-failing should exit in milliseconds when mergedCount + failedCount == total
+		res, err := WaitForSyncPRs(prs, 10*time.Second)
+		elapsed := time.Since(start)
+
+		if err == nil {
+			t.Fatalf("Expected error due to failed PR, got nil")
+		}
+		if elapsed > 1*time.Second {
+			t.Errorf("Expected fast-failing early exit, took too long: %v", elapsed)
+		}
+		if len(res) != 2 {
+			t.Fatalf("Expected 2 PRs in results, got %d", len(res))
+		}
+		if res[0].PRNumber != 101 || res[1].PRNumber != 102 {
+			t.Errorf("PR numbers not populated properly: %+v", res)
+		}
+		if res[1].IssueNumber != 42 {
+			t.Errorf("Expected issue number 42 on failed PR, got %d", res[1].IssueNumber)
+		}
+		if !strings.Contains(err.Error(), "org/repo-failed (Issue: https://github.com/org/repo-failed/issues/42)") {
+			t.Errorf("Expected error to summarize failed repo and issue link, got: %v", err)
+		}
+	})
+}
+
+func TestEnsureConsumerFailureIssue(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	t.Run("creates_new_issue_when_none_exists", func(t *testing.T) {
+		var createdRepo, createdTitle, createdLabel, createdBody string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "issue" {
+				if args[2] == "list" {
+					return "[]", "", 0, nil
+				}
+				if args[2] == "create" {
+					for i := 0; i < len(args); i++ {
+						switch args[i] {
+						case "--repo":
+							createdRepo = args[i+1]
+						case "--title":
+							createdTitle = args[i+1]
+						case "--label":
+							createdLabel = args[i+1]
+						case "--body":
+							createdBody = args[i+1]
+						}
+					}
+					return "https://github.com/org/test-consumer/issues/42\n", "", 0, nil
+				}
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		num, err := EnsureConsumerFailureIssue("org/test-consumer", 15, "Lint & Test", "https://github.com/org/test-consumer/actions/runs/123")
+		if err != nil {
+			t.Fatalf("Expected issue creation to succeed, got: %v", err)
+		}
+		if num != 42 {
+			t.Errorf("Expected issue number 42, got %d", num)
+		}
+		if createdRepo != "org/test-consumer" {
+			t.Errorf("Expected repo 'org/test-consumer', got %q", createdRepo)
+		}
+		if createdTitle != "fix(ci): governance synchronization blocked by failing CI checks" {
+			t.Errorf("Unexpected issue title: %q", createdTitle)
+		}
+		if createdLabel != "governance-sync,automated" {
+			t.Errorf("Unexpected issue labels: %q", createdLabel)
+		}
+		if !strings.Contains(createdBody, "PR #15") || !strings.Contains(createdBody, "Lint & Test") || !strings.Contains(createdBody, "https://github.com/org/test-consumer/actions/runs/123") {
+			t.Errorf("Body missing PR, check name, or URL: %s", createdBody)
+		}
+		if !strings.Contains(createdBody, "Fix the issue on main. Once merged into main, open bot/* synchronization PRs will automatically update, re-test, and auto-merge.") {
+			t.Errorf("Body missing remediation instruction: %s", createdBody)
+		}
+	})
+
+	t.Run("idempotent_when_open_issue_exists", func(t *testing.T) {
+		createCalled := false
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "issue" {
+				if args[2] == "list" {
+					return `[{"number": 99, "title": "fix(ci): governance synchronization blocked by failing CI checks"}]`, "", 0, nil
+				}
+				if args[2] == "create" {
+					createCalled = true
+					return "", "", 0, nil
+				}
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		num, err := EnsureConsumerFailureIssue("org/test-consumer", 15, "Lint & Test", "")
+		if err != nil {
+			t.Fatalf("Expected success for existing issue, got: %v", err)
+		}
+		if num != 99 {
+			t.Errorf("Expected existing issue number 99, got %d", num)
+		}
+		if createCalled {
+			t.Errorf("Expected gh issue create NOT to be called when issue exists")
+		}
+	})
+
+	t.Run("list_error_surfaces", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "issue" && args[2] == "list" {
+				return "", "GraphQL error: unauthorized", 1, fmt.Errorf("exit status 1")
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		_, err := EnsureConsumerFailureIssue("org/test-consumer", 15, "Test", "")
+		if err == nil {
+			t.Fatalf("Expected error when gh issue list fails, got nil")
+		}
+		if !strings.Contains(err.Error(), "unauthorized") {
+			t.Errorf("Expected error to mention unauthorized, got: %v", err)
+		}
+	})
+
+	t.Run("create_error_surfaces", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "issue" {
+				if args[2] == "list" {
+					return "[]", "", 0, nil
+				}
+				if args[2] == "create" {
+					return "", "cannot create issue: permission denied", 1, fmt.Errorf("exit status 1")
+				}
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		_, err := EnsureConsumerFailureIssue("org/test-consumer", 15, "Test", "")
+		if err == nil {
+			t.Fatalf("Expected error when gh issue create fails, got nil")
+		}
+		if !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("Expected error to mention permission denied, got: %v", err)
+		}
+	})
+}
+
+func TestEnsureHubFailureIssue(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	t.Run("creates_new_hub_issue_when_none_exists", func(t *testing.T) {
+		var createdRepo, createdTitle, createdLabel, createdBody string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "issue" {
+				if args[2] == "list" {
+					return "[]", "", 0, nil
+				}
+				if args[2] == "create" {
+					for i := 0; i < len(args); i++ {
+						switch args[i] {
+						case "--repo":
+							createdRepo = args[i+1]
+						case "--title":
+							createdTitle = args[i+1]
+						case "--label":
+							createdLabel = args[i+1]
+						case "--body":
+							createdBody = args[i+1]
+						}
+					}
+					return "https://github.com/Cooper-Wallace/repokit/issues/88\n", "", 0, nil
+				}
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		failedSlugs := []string{"Cooper-Wallace/repo-1", "Cooper-Wallace/repo-2"}
+		num, err := EnsureHubFailureIssue(failedSlugs, "v1.2.3")
+		if err != nil {
+			t.Fatalf("Expected hub issue creation to succeed, got: %v", err)
+		}
+		if num != 88 {
+			t.Errorf("Expected issue number 88, got %d", num)
+		}
+		if createdRepo != "Cooper-Wallace/repokit" {
+			t.Errorf("Expected hub repo 'Cooper-Wallace/repokit', got %q", createdRepo)
+		}
+		if createdTitle != "bug(propagation): governance deployment failed for release v1.2.3" {
+			t.Errorf("Unexpected title: %q", createdTitle)
+		}
+		if createdLabel != "propagation-failure,automated" {
+			t.Errorf("Unexpected label: %q", createdLabel)
+		}
+		if !strings.Contains(createdBody, "repo-1") || !strings.Contains(createdBody, "repo-2") {
+			t.Errorf("Expected failed slugs in body: %s", createdBody)
+		}
+	})
+
+	t.Run("idempotent_when_open_hub_issue_exists", func(t *testing.T) {
+		createCalled := false
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "issue" {
+				if args[2] == "list" {
+					return `[{"number": 77, "title": "bug(propagation): governance deployment failed for release v1.2.3"}]`, "", 0, nil
+				}
+				if args[2] == "create" {
+					createCalled = true
+					return "", "", 0, nil
+				}
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		num, err := EnsureHubFailureIssue([]string{"org/repo-x"}, "v1.2.3")
+		if err != nil {
+			t.Fatalf("Expected success for existing hub issue, got: %v", err)
+		}
+		if num != 77 {
+			t.Errorf("Expected existing issue number 77, got %d", num)
+		}
+		if createCalled {
+			t.Errorf("Expected gh issue create NOT to be called when hub issue exists")
+		}
+	})
+
+	t.Run("default_release_ref_when_empty", func(t *testing.T) {
+		var createdTitle string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "issue" {
+				if args[2] == "list" {
+					return "[]", "", 0, nil
+				}
+				if args[2] == "create" {
+					for i := 0; i < len(args); i++ {
+						if args[i] == "--title" {
+							createdTitle = args[i+1]
+						}
+					}
+					return "https://github.com/Cooper-Wallace/repokit/issues/105\n", "", 0, nil
+				}
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		num, err := EnsureHubFailureIssue([]string{"org/repo-y"}, "")
+		if err != nil {
+			t.Fatalf("Expected success, got: %v", err)
+		}
+		if num != 105 {
+			t.Errorf("Expected 105, got %d", num)
+		}
+		if createdTitle != "bug(propagation): governance deployment failed for release latest" {
+			t.Errorf("Expected default release ref 'latest', got %q", createdTitle)
+		}
+	})
+
+	t.Run("list_error_surfaces", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "issue" && args[2] == "list" {
+				return "", "API rate limit exceeded", 1, fmt.Errorf("exit status 1")
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		_, err := EnsureHubFailureIssue([]string{"org/repo-z"}, "v1.0.0")
+		if err == nil {
+			t.Fatalf("Expected error when gh issue list fails, got nil")
+		}
+		if !strings.Contains(err.Error(), "rate limit") {
+			t.Errorf("Expected error to mention rate limit, got: %v", err)
+		}
+	})
+
+	t.Run("create_error_surfaces", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "issue" {
+				if args[2] == "list" {
+					return "[]", "", 0, nil
+				}
+				if args[2] == "create" {
+					return "", "GraphQL error: server error", 1, fmt.Errorf("exit status 1")
+				}
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		_, err := EnsureHubFailureIssue([]string{"org/repo-z"}, "v1.0.0")
+		if err == nil {
+			t.Fatalf("Expected error when gh issue create fails, got nil")
+		}
+		if !strings.Contains(err.Error(), "server error") {
+			t.Errorf("Expected error to mention server error, got: %v", err)
 		}
 	})
 }

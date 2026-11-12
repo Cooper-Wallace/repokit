@@ -1540,10 +1540,14 @@ type ConfigureOptions struct {
 }
 
 type SyncPRInfo struct {
-	Slug     string `json:"slug"`
-	Branch   string `json:"branch"`
-	PRNumber int    `json:"number,omitempty"`
-	PRURL    string `json:"url,omitempty"`
+	Slug           string `json:"slug"`
+	Branch         string `json:"branch"`
+	PRNumber       int    `json:"number,omitempty"`
+	PRURL          string `json:"url,omitempty"`
+	FailedCheck    string `json:"failed_check,omitempty"`
+	FailedCheckURL string `json:"failed_check_url,omitempty"`
+	IssueNumber    int    `json:"issue_number,omitempty"`
+	IssueURL       string `json:"issue_url,omitempty"`
 }
 
 // SyncPRPollInterval is the duration between poll attempts in WaitForSyncPRs.
@@ -1687,6 +1691,13 @@ func configureSingleRepository(opts ConfigureOptions) error {
 								LogInfo("Waiting for downstream synchronization PR to auto-merge on %s...", slug)
 								pending := []SyncPRInfo{{Slug: slug, Branch: "bot/repokit-sync"}}
 								if _, err := WaitForSyncPRs(pending, opts.MergeTimeout); err != nil {
+									rel := opts.ReleaseRef
+									if rel == "" {
+										rel = "latest"
+									}
+									if _, hubErr := EnsureHubFailureIssue([]string{slug}, rel); hubErr != nil {
+										LogWarn("Failed to ensure hub propagation-failure issue: %v", hubErr)
+									}
 									return err
 								}
 							}
@@ -1980,7 +1991,25 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 
 	if opts.WaitForMerge && len(pendingPRs) > 0 {
 		LogInfo("Waiting for %d downstream synchronization PRs to auto-merge...", len(pendingPRs))
-		if _, err := WaitForSyncPRs(pendingPRs, opts.MergeTimeout); err != nil {
+		if resPRs, err := WaitForSyncPRs(pendingPRs, opts.MergeTimeout); err != nil {
+			var failedSlugs []string
+			for _, p := range resPRs {
+				if p.FailedCheck != "" || p.IssueNumber > 0 {
+					failedSlugs = append(failedSlugs, p.Slug)
+				}
+			}
+			if len(failedSlugs) == 0 {
+				for _, p := range pendingPRs {
+					failedSlugs = append(failedSlugs, p.Slug)
+				}
+			}
+			rel := opts.ReleaseRef
+			if rel == "" {
+				rel = "latest"
+			}
+			if _, hubErr := EnsureHubFailureIssue(failedSlugs, rel); hubErr != nil {
+				LogWarn("Failed to ensure hub propagation-failure issue: %v", hubErr)
+			}
 			return err
 		}
 	}
@@ -2007,6 +2036,133 @@ type ghStatusCheckEntry struct {
 	DetailsURL string `json:"detailsUrl,omitempty"`
 	TargetURL  string `json:"targetUrl,omitempty"`
 	URL        string `json:"url,omitempty"`
+}
+
+// EnsureConsumerFailureIssue idempotently creates or retrieves an open issue on a consumer repository
+// alerting that governance synchronization PR was blocked by failing CI checks.
+func EnsureConsumerFailureIssue(slug string, prNumber int, failedCheck string, checkURL string) (int, error) {
+	stdout, stderr, code, _ := RunCmd([]string{
+		"gh", "issue", "list",
+		"--repo", slug,
+		"--label", "governance-sync",
+		"--state", "open",
+		"--json", "number,title",
+	}, "")
+	if code != 0 {
+		return 0, fmt.Errorf("failed to list open issues on %s: %s", slug, strings.TrimSpace(stderr))
+	}
+
+	var existing []struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &existing); err == nil && len(existing) > 0 {
+		num := existing[0].Number
+		LogInfo("Existing governance-sync issue #%d found on %s", num, slug)
+		return num, nil
+	}
+
+	var bodyBuilder strings.Builder
+	bodyBuilder.WriteString(fmt.Sprintf("Repokit attempted governance synchronization in PR #%d, but CI check `%s` failed.", prNumber, failedCheck))
+	if checkURL != "" {
+		bodyBuilder.WriteString(fmt.Sprintf(" Failing check details: %s", checkURL))
+	}
+	bodyBuilder.WriteString("\n\nFix the issue on main. Once merged into main, open bot/* synchronization PRs will automatically update, re-test, and auto-merge.")
+
+	bodyText := bodyBuilder.String()
+
+	args := []string{
+		"gh", "issue", "create",
+		"--repo", slug,
+		"--title", "fix(ci): governance synchronization blocked by failing CI checks",
+		"--label", "governance-sync,automated",
+		"--body", bodyText,
+	}
+
+	out, errOut, createCode, _ := RunCmd(args, "")
+	if createCode != 0 {
+		return 0, fmt.Errorf("failed to create governance-sync issue on %s: %s", slug, strings.TrimSpace(errOut))
+	}
+
+	outTrimmed := strings.TrimSpace(out)
+	var issueNum int
+	re := regexp.MustCompile(`/issues/(\d+)`)
+	if match := re.FindStringSubmatch(outTrimmed); len(match) > 1 {
+		issueNum, _ = strconv.Atoi(match[1])
+	} else if num, err := strconv.Atoi(outTrimmed); err == nil {
+		issueNum = num
+	}
+
+	LogSuccess("[%s] Created governance-sync issue #%d", slug, issueNum)
+	return issueNum, nil
+}
+
+// EnsureHubFailureIssue idempotently creates or retrieves an open issue on the governance hub repo (Cooper-Wallace/repokit)
+// alerting that governance deployment failed for a given release.
+func EnsureHubFailureIssue(failedSlugs []string, releaseRef string) (int, error) {
+	hubRepo := DefaultGovernanceRepo
+	if hubRepo == "" {
+		hubRepo = "Cooper-Wallace/repokit"
+	}
+
+	stdout, stderr, code, _ := RunCmd([]string{
+		"gh", "issue", "list",
+		"--repo", hubRepo,
+		"--label", "propagation-failure",
+		"--state", "open",
+		"--json", "number,title",
+	}, "")
+	if code != 0 {
+		return 0, fmt.Errorf("failed to list open issues on %s: %s", hubRepo, strings.TrimSpace(stderr))
+	}
+
+	var existing []struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &existing); err == nil && len(existing) > 0 {
+		num := existing[0].Number
+		LogInfo("Existing propagation-failure issue #%d found on %s", num, hubRepo)
+		return num, nil
+	}
+
+	ref := releaseRef
+	if ref == "" {
+		ref = "latest"
+	}
+	title := fmt.Sprintf("bug(propagation): governance deployment failed for release %s", ref)
+
+	var bodyBuilder strings.Builder
+	bodyBuilder.WriteString(fmt.Sprintf("Governance deployment failed for release `%s` across %d downstream repositories:\n\n", ref, len(failedSlugs)))
+	for _, s := range failedSlugs {
+		bodyBuilder.WriteString(fmt.Sprintf("- %s\n", s))
+	}
+	bodyBuilder.WriteString("\nPlease inspect consumer repository issues and resolve any CI or synchronization failures.")
+
+	args := []string{
+		"gh", "issue", "create",
+		"--repo", hubRepo,
+		"--title", title,
+		"--label", "propagation-failure,automated",
+		"--body", bodyBuilder.String(),
+	}
+
+	out, errOut, createCode, _ := RunCmd(args, "")
+	if createCode != 0 {
+		return 0, fmt.Errorf("failed to create propagation-failure issue on %s: %s", hubRepo, strings.TrimSpace(errOut))
+	}
+
+	outTrimmed := strings.TrimSpace(out)
+	var issueNum int
+	re := regexp.MustCompile(`/issues/(\d+)`)
+	if match := re.FindStringSubmatch(outTrimmed); len(match) > 1 {
+		issueNum, _ = strconv.Atoi(match[1])
+	} else if num, err := strconv.Atoi(outTrimmed); err == nil {
+		issueNum = num
+	}
+
+	LogSuccess("[%s] Created propagation-failure issue #%d", hubRepo, issueNum)
+	return issueNum, nil
 }
 
 // WaitForSyncPRs polls active downstream synchronization PRs until merged, closed, failed, or timed out.
@@ -2111,6 +2267,8 @@ func WaitForSyncPRs(prs []SyncPRInfo, timeout time.Duration) ([]SyncPRInfo, erro
 					}
 
 					statuses[i].failed = true
+					statuses[i].info.FailedCheck = checkName
+					statuses[i].info.FailedCheckURL = checkURL
 					if checkURL != "" {
 						statuses[i].failureReason = fmt.Sprintf("CI check %q failed (%s): %s", checkName, conc, checkURL)
 					} else {
@@ -2121,14 +2279,18 @@ func WaitForSyncPRs(prs []SyncPRInfo, timeout time.Duration) ([]SyncPRInfo, erro
 			}
 		}
 
-		allDone := true
+		mergedCount := 0
+		failedCount := 0
 		for i := range statuses {
-			if !statuses[i].merged && !statuses[i].failed {
-				allDone = false
-				break
+			if statuses[i].merged {
+				mergedCount++
+			} else if statuses[i].failed {
+				failedCount++
 			}
 		}
-		if allDone {
+
+		if mergedCount+failedCount == len(prs) {
+			// All PRs have reached terminal status! Break out of the polling loop immediately without waiting for remaining timeout ticks.
 			break
 		}
 
@@ -2155,18 +2317,45 @@ func WaitForSyncPRs(prs []SyncPRInfo, timeout time.Duration) ([]SyncPRInfo, erro
 		}
 	}
 
+	var failedSummaries []string
 	var failedSlugs []string
 	resultPRs := make([]SyncPRInfo, len(statuses))
-	for i, st := range statuses {
-		resultPRs[i] = st.info
+	for i := range statuses {
+		st := &statuses[i]
 		if st.failed || !st.merged {
 			failedSlugs = append(failedSlugs, st.info.Slug)
-			LogError("[%s] Downstream PR failed: %s (PR: %s)", st.info.Slug, st.failureReason, st.info.PRURL)
+
+			// When a PR has failed checks, call EnsureConsumerFailureIssue
+			if st.info.FailedCheck != "" {
+				issueNum, err := EnsureConsumerFailureIssue(st.info.Slug, st.info.PRNumber, st.info.FailedCheck, st.info.FailedCheckURL)
+				if err == nil && issueNum > 0 {
+					st.info.IssueNumber = issueNum
+					st.info.IssueURL = fmt.Sprintf("https://github.com/%s/issues/%d", st.info.Slug, issueNum)
+					LogInfo("[%s] Governance-sync issue #%d tracked: %s", st.info.Slug, issueNum, st.info.IssueURL)
+				} else if err != nil {
+					LogWarn("[%s] Failed to ensure consumer failure issue: %v", st.info.Slug, err)
+				}
+			}
+
+			summary := st.info.Slug
+			if st.info.IssueURL != "" {
+				summary = fmt.Sprintf("%s (Issue: %s)", st.info.Slug, st.info.IssueURL)
+			} else if st.info.PRURL != "" {
+				summary = fmt.Sprintf("%s (PR: %s)", st.info.Slug, st.info.PRURL)
+			}
+			failedSummaries = append(failedSummaries, summary)
+
+			if st.info.IssueURL != "" {
+				LogError("[%s] Downstream PR failed: %s (PR: %s, Issue: %s)", st.info.Slug, st.failureReason, st.info.PRURL, st.info.IssueURL)
+			} else {
+				LogError("[%s] Downstream PR failed: %s (PR: %s)", st.info.Slug, st.failureReason, st.info.PRURL)
+			}
 		}
+		resultPRs[i] = st.info
 	}
 
 	if len(failedSlugs) > 0 {
-		return resultPRs, fmt.Errorf("downstream synchronization PRs failed to merge for %d repositories: %s", len(failedSlugs), strings.Join(failedSlugs, ", "))
+		return resultPRs, fmt.Errorf("downstream synchronization PRs failed to merge for %d repositories: %s", len(failedSlugs), strings.Join(failedSummaries, ", "))
 	}
 
 	LogSuccess("All %d downstream synchronization PRs merged successfully!", len(prs))
