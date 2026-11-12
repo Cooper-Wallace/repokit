@@ -1685,6 +1685,12 @@ func TestMoreBranches(t *testing.T) {
 			t.Errorf("Expected python from setup.py")
 		}
 
+		d1b := t.TempDir()
+		_ = os.WriteFile(filepath.Join(d1b, "requirements.txt"), []byte("requests\n"), 0644)
+		if DetectArchetype(d1b) != "python" {
+			t.Errorf("Expected python from requirements.txt")
+		}
+
 		d2 := t.TempDir()
 		_ = os.WriteFile(filepath.Join(d2, "build.gradle"), []byte("// gradle"), 0644)
 		if DetectArchetype(d2) != "java" {
@@ -3404,6 +3410,119 @@ func TestExecuteRelease(t *testing.T) {
 		}
 	})
 
+	t.Run("Mode B: Release Staging - PR Edit Fallback to PATCH on GraphQL error", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		var executedCmds [][]string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			executedCmds = append(executedCmds, args)
+			if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "rev-parse" {
+				return tmpDir + "\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" && args[2] == "-1" {
+				return "fix: resolve memory leak\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "tag" && args[2] == "--list" {
+				return "v1.1.0\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" && strings.Contains(args[2], "..HEAD") {
+				return "abcdef1|fix: resolve memory leak\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "list" {
+				return "55\n", "", 0, nil
+			}
+			if len(args) >= 4 && args[0] == "gh" && args[1] == "pr" && args[2] == "edit" {
+				return "", "GraphQL: Field 'projectCards' doesn't exist on type 'PullRequest'", 1, fmt.Errorf("exit status 1")
+			}
+			if len(args) >= 5 && args[0] == "gh" && args[1] == "api" && args[2] == "--method" && args[3] == "PATCH" {
+				return `{"number": 55}`, "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "rev-parse" && args[2] == "HEAD" {
+				return "staging456\n", "", 0, nil
+			}
+			if len(args) >= 5 && args[0] == "git" && args[1] == "-C" && args[3] == "remote" && args[4] == "get-url" {
+				return "https://github.com/Cooper-Wallace/repokit.git\n", "", 0, nil
+			}
+			if len(args) >= 5 && args[0] == "gh" && args[1] == "api" && args[2] == "--method" && args[3] == "POST" && strings.Contains(args[4], "statuses") {
+				return "{}", "", 0, nil
+			}
+			return "", "", 0, nil
+		}
+
+		opts := ReleaseOptions{
+			Path:   tmpDir,
+			DryRun: false,
+		}
+
+		res, err := ExecuteRelease(opts)
+		if err != nil {
+			t.Fatalf("Expected ExecuteRelease to succeed via fallback PATCH, got: %v", err)
+		}
+		if res.TagName != "v1.1.1" {
+			t.Errorf("Expected v1.1.1, got %s", res.TagName)
+		}
+
+		foundPatch := false
+		for _, cmd := range executedCmds {
+			if len(cmd) >= 5 && cmd[0] == "gh" && cmd[1] == "api" && cmd[2] == "--method" && cmd[3] == "PATCH" {
+				if strings.Contains(cmd[4], "repos/Cooper-Wallace/repokit/pulls/55") {
+					foundPatch = true
+				}
+			}
+		}
+		if !foundPatch {
+			t.Errorf("Expected fallback gh api --method PATCH for PR 55")
+		}
+	})
+
+	t.Run("Mode B: Release Staging - PR Edit and PATCH Both Fail Surfaces Stderr", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "rev-parse" {
+				return tmpDir + "\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" && args[2] == "-1" {
+				return "fix: resolve memory leak\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "tag" && args[2] == "--list" {
+				return "v1.1.0\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" && strings.Contains(args[2], "..HEAD") {
+				return "abcdef1|fix: resolve memory leak\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "list" {
+				return "55\n", "", 0, nil
+			}
+			if len(args) >= 4 && args[0] == "gh" && args[1] == "pr" && args[2] == "edit" {
+				return "", "GraphQL: Field 'projectCards' doesn't exist", 1, fmt.Errorf("exit status 1")
+			}
+			if len(args) >= 5 && args[0] == "gh" && args[1] == "api" && args[2] == "--method" && args[3] == "PATCH" {
+				return "", "API rate limit exceeded", 1, fmt.Errorf("exit status 1")
+			}
+			if len(args) >= 5 && args[0] == "git" && args[1] == "-C" && args[3] == "remote" && args[4] == "get-url" {
+				return "https://github.com/Cooper-Wallace/repokit.git\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		}
+
+		opts := ReleaseOptions{
+			Path:   tmpDir,
+			DryRun: false,
+		}
+
+		_, err := ExecuteRelease(opts)
+		if err == nil {
+			t.Fatalf("Expected ExecuteRelease to fail when edit and patch both fail, got nil")
+		}
+		if !strings.Contains(err.Error(), "projectCards") {
+			t.Errorf("Expected error to contain original stderr 'projectCards', got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "API rate limit exceeded") {
+			t.Errorf("Expected error to contain patch stderr 'API rate limit exceeded', got: %v", err)
+		}
+	})
+
 	t.Run("Mode B: No Releasable Commits", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		outFile := filepath.Join(tmpDir, "github_output")
@@ -4005,6 +4124,86 @@ func TestEnsureConsumerFailureIssue(t *testing.T) {
 			t.Errorf("Expected error to mention permission denied, got: %v", err)
 		}
 	})
+
+	t.Run("missing_labels_provisions_and_retries", func(t *testing.T) {
+		var createdLabels []string
+		issueCreateCalls := 0
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "issue" {
+				if args[2] == "list" {
+					return "[]", "", 0, nil
+				}
+				if args[2] == "create" {
+					issueCreateCalls++
+					if issueCreateCalls == 1 {
+						return "", "could not add label \"governance-sync\": label not found", 1, fmt.Errorf("exit status 1")
+					}
+					return "https://github.com/org/test-consumer/issues/77\n", "", 0, nil
+				}
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "label" && args[2] == "create" {
+				createdLabels = append(createdLabels, args[3])
+				return "", "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		num, err := EnsureConsumerFailureIssue("org/test-consumer", 20, "CI Test", "")
+		if err != nil {
+			t.Fatalf("Expected success after provisioning labels, got: %v", err)
+		}
+		if num != 77 {
+			t.Errorf("Expected issue number 77, got %d", num)
+		}
+		if issueCreateCalls != 2 {
+			t.Errorf("Expected 2 issue create attempts, got %d", issueCreateCalls)
+		}
+		if len(createdLabels) != 2 || createdLabels[0] != "governance-sync" || createdLabels[1] != "automated" {
+			t.Errorf("Expected labels governance-sync and automated to be created, got: %v", createdLabels)
+		}
+	})
+
+	t.Run("missing_labels_fallback_without_labels", func(t *testing.T) {
+		issueCreateWithoutLabels := false
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "issue" {
+				if args[2] == "list" {
+					return "[]", "", 0, nil
+				}
+				if args[2] == "create" {
+					hasLabelArg := false
+					for _, a := range args {
+						if a == "--label" {
+							hasLabelArg = true
+							break
+						}
+					}
+					if hasLabelArg {
+						return "", "could not add label: not found", 1, fmt.Errorf("exit status 1")
+					}
+					issueCreateWithoutLabels = true
+					return "https://github.com/org/test-consumer/issues/88\n", "", 0, nil
+				}
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "label" && args[2] == "create" {
+				return "", "label create forbidden", 1, fmt.Errorf("exit status 1")
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		num, err := EnsureConsumerFailureIssue("org/test-consumer", 20, "CI Test", "")
+		if err != nil {
+			t.Fatalf("Expected success via fallback without labels, got: %v", err)
+		}
+		if num != 88 {
+			t.Errorf("Expected issue number 88, got %d", num)
+		}
+		if !issueCreateWithoutLabels {
+			t.Errorf("Expected issue create to be attempted without --label flag")
+		}
+	})
 }
 
 func TestEnsureHubFailureIssue(t *testing.T) {
@@ -4153,6 +4352,42 @@ func TestEnsureHubFailureIssue(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "server error") {
 			t.Errorf("Expected error to mention server error, got: %v", err)
+		}
+	})
+
+	t.Run("hub_missing_labels_provisions_and_retries", func(t *testing.T) {
+		var createdLabels []string
+		issueCreateCalls := 0
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "issue" {
+				if args[2] == "list" {
+					return "[]", "", 0, nil
+				}
+				if args[2] == "create" {
+					issueCreateCalls++
+					if issueCreateCalls == 1 {
+						return "", "could not add label \"propagation-failure\": label not found", 1, fmt.Errorf("exit status 1")
+					}
+					return "https://github.com/Cooper-Wallace/repokit/issues/99\n", "", 0, nil
+				}
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "label" && args[2] == "create" {
+				createdLabels = append(createdLabels, args[3])
+				return "", "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		num, err := EnsureHubFailureIssue([]string{"org/downstream-repo"}, "v2.0.0")
+		if err != nil {
+			t.Fatalf("Expected success after provisioning hub labels, got: %v", err)
+		}
+		if num != 99 {
+			t.Errorf("Expected issue number 99, got %d", num)
+		}
+		if len(createdLabels) != 2 || createdLabels[0] != "propagation-failure" || createdLabels[1] != "automated" {
+			t.Errorf("Expected hub labels propagation-failure and automated, got: %v", createdLabels)
 		}
 	})
 }
@@ -4326,4 +4561,206 @@ func TestDefaultBranchVerification(t *testing.T) {
 			t.Errorf("Expected AuditRepository to pass when default branch is main, got passed=%v, err=%v", passed, err)
 		}
 	})
+}
+
+func TestTemplateWorkflowValidity(t *testing.T) {
+	archetypes := []string{"bash", "go", "java", "python", "typescript"}
+
+	for _, arch := range archetypes {
+		t.Run(arch+"_sync_yml", func(t *testing.T) {
+			path := filepath.Join("templates", arch, ".github", "workflows", "sync.yml")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("Failed to read %s: %v", path, err)
+			}
+			content := string(data)
+			if strings.Contains(content, "secrets:\n      inherit") || strings.Contains(content, "secrets:\n    inherit") {
+				t.Errorf("%s has invalid multi-line secrets: inherit syntax", path)
+			}
+			if !strings.Contains(content, "secrets: inherit") {
+				t.Errorf("%s missing 'secrets: inherit'", path)
+			}
+		})
+
+		t.Run(arch+"_release_yml", func(t *testing.T) {
+			path := filepath.Join("templates", arch, ".github", "workflows", "release.yml")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("Failed to read %s: %v", path, err)
+			}
+			content := string(data)
+			if !strings.Contains(content, "statuses: write") {
+				t.Errorf("%s missing 'statuses: write'", path)
+			}
+			if !strings.Contains(content, "actions: write") {
+				t.Errorf("%s missing 'actions: write'", path)
+			}
+			if !strings.Contains(content, "contents: write") {
+				t.Errorf("%s missing 'contents: write'", path)
+			}
+			if !strings.Contains(content, "pull-requests: write") {
+				t.Errorf("%s missing 'pull-requests: write'", path)
+			}
+		})
+	}
+
+	t.Run("GenericReleaseWorkflow_constant", func(t *testing.T) {
+		if !strings.Contains(GenericReleaseWorkflow, "statuses: write") {
+			t.Errorf("GenericReleaseWorkflow missing 'statuses: write'")
+		}
+		if !strings.Contains(GenericReleaseWorkflow, "actions: write") {
+			t.Errorf("GenericReleaseWorkflow missing 'actions: write'")
+		}
+	})
+}
+
+func TestConfigureMultipleRepositories_Deduplication(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo-dedup")
+	_ = os.MkdirAll(filepath.Join(repoDir, ".git"), 0755)
+
+	apiRepoSettingsCalls := 0
+	apiWorkflowPermsCalls := 0
+	apiBranchRulesetCalls := 0
+
+	CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+		if len(args) >= 5 && args[0] == "git" && args[1] == "-C" && args[3] == "remote" && args[4] == "get-url" {
+			return "https://github.com/org/repo-dedup.git\n", "", 0, nil
+		}
+		if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "rev-parse" {
+			return repoDir + "\n", "", 0, nil
+		}
+		if len(args) >= 4 && args[0] == "gh" && args[1] == "repo" && args[2] == "view" {
+			return `{"defaultBranchRef": {"name": "main"}}`, "", 0, nil
+		}
+		if len(args) >= 3 && args[0] == "gh" && args[1] == "api" {
+			joined := strings.Join(args, " ")
+			if strings.Contains(joined, "--method PATCH repos/org/repo-dedup") {
+				apiRepoSettingsCalls++
+				return "{}", "", 0, nil
+			}
+			if strings.Contains(joined, "actions/permissions/workflow") {
+				apiWorkflowPermsCalls++
+				return "{}", "", 0, nil
+			}
+			if len(args) == 3 && args[2] == "repos/org/repo-dedup/rulesets" {
+				apiBranchRulesetCalls++
+				return "[]", "", 0, nil
+			}
+			if strings.Contains(joined, "rulesets") {
+				return "{}", "", 0, nil
+			}
+		}
+		if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "status" {
+			return "", "", 0, nil
+		}
+		return defaultCommandRunner(args, dir, input)
+	}
+
+	err := ConfigureWithOptions(ConfigureOptions{
+		Local:    true,
+		LocalDir: tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("ConfigureWithOptions failed: %v", err)
+	}
+
+	if apiRepoSettingsCalls != 1 {
+		t.Errorf("Expected ApplyGitHubRepoSettings to be called exactly 1 time, got %d", apiRepoSettingsCalls)
+	}
+	if apiWorkflowPermsCalls != 1 {
+		t.Errorf("Expected ApplyWorkflowPermissions to be called exactly 1 time, got %d", apiWorkflowPermsCalls)
+	}
+	if apiBranchRulesetCalls != 1 {
+		t.Errorf("Expected ApplyBranchRuleset to be called exactly 1 time, got %d", apiBranchRulesetCalls)
+	}
+}
+
+func TestWaitForSyncPRs_DefaultTimeout(t *testing.T) {
+	res, err := WaitForSyncPRs(nil, 0)
+	if err != nil {
+		t.Fatalf("WaitForSyncPRs with zero timeout failed: %v", err)
+	}
+	if len(res) != 0 {
+		t.Errorf("Expected 0 PRs returned, got %d", len(res))
+	}
+}
+
+func TestEnsureRepoLabels(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	var labelArgs [][]string
+	CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+		if len(args) >= 3 && args[0] == "gh" && args[1] == "label" && args[2] == "create" {
+			labelArgs = append(labelArgs, args)
+			return "", "", 0, nil
+		}
+		return defaultCommandRunner(args, dir, input)
+	}
+
+	err := EnsureRepoLabels("org/label-repo", "label-a", "label-b")
+	if err != nil {
+		t.Fatalf("EnsureRepoLabels failed: %v", err)
+	}
+	if len(labelArgs) != 2 {
+		t.Fatalf("Expected 2 label create calls, got %d", len(labelArgs))
+	}
+	if labelArgs[0][3] != "label-a" || labelArgs[1][3] != "label-b" {
+		t.Errorf("Unexpected label arguments: %v", labelArgs)
+	}
+}
+
+func TestArchetypeWorkflowPermissionsAndBotPRHydration(t *testing.T) {
+	archetypes := []string{"bash", "go", "java", "python", "typescript"}
+
+	for _, arch := range archetypes {
+		t.Run("template_"+arch+"_ci_permissions", func(t *testing.T) {
+			path := filepath.Join("templates", arch, ".github", "workflows", "ci.yml")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("Failed to read %s: %v", path, err)
+			}
+			content := string(data)
+			if !strings.Contains(content, "contents: write") {
+				t.Errorf("%s missing contents: write", path)
+			}
+			if !strings.Contains(content, "pull-requests: write") {
+				t.Errorf("%s missing pull-requests: write", path)
+			}
+			if !strings.Contains(content, "statuses: write") {
+				t.Errorf("%s missing statuses: write", path)
+			}
+			if !strings.Contains(content, "secrets: inherit") {
+				t.Errorf("%s missing secrets: inherit", path)
+			}
+		})
+
+		t.Run("reusable_"+arch+"_bot_hydration", func(t *testing.T) {
+			path := filepath.Join(".github", "workflows", "reusable-"+arch+".yml")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("Failed to read %s: %v", path, err)
+			}
+			content := string(data)
+			if !strings.Contains(content, `startswith("bot/")`) {
+				t.Errorf("%s missing startswith(\"bot/\")", path)
+			}
+			if strings.Contains(content, `--head "bot/"`) {
+				t.Errorf("%s still contains --head \"bot/\"", path)
+			}
+			if !strings.Contains(content, "contents: write") {
+				t.Errorf("%s missing contents: write", path)
+			}
+			if !strings.Contains(content, "pull-requests: write") {
+				t.Errorf("%s missing pull-requests: write", path)
+			}
+			if !strings.Contains(content, "statuses: write") {
+				t.Errorf("%s missing statuses: write", path)
+			}
+		})
+	}
 }
