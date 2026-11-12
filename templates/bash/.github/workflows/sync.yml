@@ -17,5 +17,4 @@ jobs:
     uses: {{governance_slug}}/.github/workflows/reusable-sync.yml@v1
     with:
       dry-run: ${{ inputs.dry-run || false }}
-    secrets:
-      inherit
+    secrets: inherit

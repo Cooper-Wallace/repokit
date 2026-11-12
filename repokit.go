@@ -196,6 +196,8 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  statuses: write
+  actions: write
 
 jobs:
   release-stage:
@@ -557,7 +559,7 @@ func DetectArchetype(repoRoot string) string {
 	if fileExists(filepath.Join(repoRoot, "go.mod")) {
 		return "go"
 	}
-	if fileExists(filepath.Join(repoRoot, "pyproject.toml")) || fileExists(filepath.Join(repoRoot, "setup.py")) {
+	if fileExists(filepath.Join(repoRoot, "pyproject.toml")) || fileExists(filepath.Join(repoRoot, "setup.py")) || fileExists(filepath.Join(repoRoot, "requirements.txt")) {
 		return "python"
 	}
 	if fileExists(filepath.Join(repoRoot, "pom.xml")) || fileExists(filepath.Join(repoRoot, "build.gradle")) {
@@ -1734,6 +1736,21 @@ func ConfigureWithOptions(opts ConfigureOptions) error {
 	return configureSingleRepository(opts)
 }
 
+// ScaffoldLocalRepository configures local hooks, template files, archetype CI, and release workflows.
+func ScaffoldLocalRepository(repoRoot string, force bool) error {
+	_ = InstallHooks(repoRoot, true)
+	if err := ScaffoldTemplates(repoRoot, force); err != nil {
+		return err
+	}
+	if _, err := ScaffoldArchetypeCI(repoRoot, force); err != nil {
+		return err
+	}
+	if _, err := ScaffoldReleaseWorkflow(repoRoot, force); err != nil {
+		return err
+	}
+	return nil
+}
+
 func configureSingleRepository(opts ConfigureOptions) error {
 	targetDir := opts.TargetDir
 	if targetDir == "" && opts.LocalDir != "" {
@@ -1794,10 +1811,7 @@ func configureSingleRepository(opts ConfigureOptions) error {
 		_ = ApplyWorkflowPermissions(slug)
 		_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil)
 	}
-	_ = InstallHooks(repoRoot, true)
-	_ = ScaffoldTemplates(repoRoot, opts.Force)
-	_, _ = ScaffoldArchetypeCI(repoRoot, opts.Force)
-	_, _ = ScaffoldReleaseWorkflow(repoRoot, opts.Force)
+	_ = ScaffoldLocalRepository(repoRoot, opts.Force)
 
 	if opts.DirectCommit {
 		statusOut, _, _, _ := RunCmd([]string{"git", "-C", repoRoot, "status", "--porcelain"}, "")
@@ -2104,7 +2118,7 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 
 			ensureGitAuthorIdentity(localPath)
 
-			if err := ConfigureRepository(localPath, opts.Force); err != nil {
+			if err := ScaffoldLocalRepository(localPath, opts.Force); err != nil {
 				SynchronizedLog(func() {
 					LogWarn("Failed to configure local repository at %s: %v", localPath, err)
 				})
@@ -2296,6 +2310,21 @@ type ghStatusCheckEntry struct {
 	URL        string `json:"url,omitempty"`
 }
 
+// EnsureRepoLabels ensures the specified labels exist on the given repository using gh label create.
+func EnsureRepoLabels(slug string, labels ...string) error {
+	var errs []error
+	for _, label := range labels {
+		_, stderr, code, err := RunCmd([]string{"gh", "label", "create", label, "--repo", slug, "--force"}, "")
+		if err != nil || code != 0 {
+			errs = append(errs, fmt.Errorf("failed to ensure label %s on %s: %s", label, slug, strings.TrimSpace(stderr)))
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
 // EnsureConsumerFailureIssue idempotently creates or retrieves an open issue on a consumer repository
 // alerting that governance synchronization PR was blocked by failing CI checks.
 func EnsureConsumerFailureIssue(slug string, prNumber int, failedCheck string, checkURL string) (int, error) {
@@ -2339,7 +2368,26 @@ func EnsureConsumerFailureIssue(slug string, prNumber int, failedCheck string, c
 
 	out, errOut, createCode, _ := RunCmd(args, "")
 	if createCode != 0 {
-		return 0, fmt.Errorf("failed to create governance-sync issue on %s: %s", slug, strings.TrimSpace(errOut))
+		errLower := strings.ToLower(errOut)
+		if strings.Contains(errLower, "label") || strings.Contains(errLower, "not found") {
+			_ = EnsureRepoLabels(slug, "governance-sync", "automated")
+			out, errOut, createCode, _ = RunCmd(args, "")
+		}
+		if createCode != 0 {
+			errLower = strings.ToLower(errOut)
+			if strings.Contains(errLower, "label") || strings.Contains(errLower, "not found") {
+				argsNoLabel := []string{
+					"gh", "issue", "create",
+					"--repo", slug,
+					"--title", "fix(ci): governance synchronization blocked by failing CI checks",
+					"--body", bodyText,
+				}
+				out, errOut, createCode, _ = RunCmd(argsNoLabel, "")
+			}
+		}
+		if createCode != 0 {
+			return 0, fmt.Errorf("failed to create governance-sync issue on %s: %s", slug, strings.TrimSpace(errOut))
+		}
 	}
 
 	outTrimmed := strings.TrimSpace(out)
@@ -2407,7 +2455,26 @@ func EnsureHubFailureIssue(failedSlugs []string, releaseRef string) (int, error)
 
 	out, errOut, createCode, _ := RunCmd(args, "")
 	if createCode != 0 {
-		return 0, fmt.Errorf("failed to create propagation-failure issue on %s: %s", hubRepo, strings.TrimSpace(errOut))
+		errLower := strings.ToLower(errOut)
+		if strings.Contains(errLower, "label") || strings.Contains(errLower, "not found") {
+			_ = EnsureRepoLabels(hubRepo, "propagation-failure", "automated")
+			out, errOut, createCode, _ = RunCmd(args, "")
+		}
+		if createCode != 0 {
+			errLower = strings.ToLower(errOut)
+			if strings.Contains(errLower, "label") || strings.Contains(errLower, "not found") {
+				argsNoLabel := []string{
+					"gh", "issue", "create",
+					"--repo", hubRepo,
+					"--title", title,
+					"--body", bodyBuilder.String(),
+				}
+				out, errOut, createCode, _ = RunCmd(argsNoLabel, "")
+			}
+		}
+		if createCode != 0 {
+			return 0, fmt.Errorf("failed to create propagation-failure issue on %s: %s", hubRepo, strings.TrimSpace(errOut))
+		}
 	}
 
 	outTrimmed := strings.TrimSpace(out)
@@ -2429,7 +2496,7 @@ func WaitForSyncPRs(prs []SyncPRInfo, timeout time.Duration) ([]SyncPRInfo, erro
 		return prs, nil
 	}
 	if timeout <= 0 {
-		timeout = 5 * time.Minute
+		timeout = 15 * time.Minute
 	}
 
 	type prTrackStatus struct {
@@ -3323,8 +3390,40 @@ func ExecuteRelease(opts ReleaseOptions) (*ReleaseResult, error) {
 
 		prNum := strings.TrimSpace(prOut)
 		if prNum != "" && prNum != "null" {
-			if _, _, code, err := RunCmd([]string{"gh", "pr", "edit", prNum, "--title", prTitle, "--body", prBody}, repoRoot); err != nil || code != 0 {
-				return nil, fmt.Errorf("failed to edit PR #%s: %w", prNum, err)
+			_, stderr, code, err := RunCmd([]string{"gh", "pr", "edit", prNum, "--title", prTitle, "--body", prBody}, repoRoot)
+			if err != nil || code != 0 {
+				fallbackSucceeded := false
+				var patchStderr string
+				slug, slugErr := GetRepoSlug(repoRoot)
+				if slugErr == nil && slug != "" {
+					patchArgs := []string{
+						"gh", "api", "--method", "PATCH",
+						fmt.Sprintf("repos/%s/pulls/%s", slug, prNum),
+						"-f", "title=" + prTitle,
+						"-f", "body=" + prBody,
+					}
+					var patchCode int
+					var patchErr error
+					_, patchStderr, patchCode, patchErr = RunCmd(patchArgs, repoRoot)
+					if patchErr == nil && patchCode == 0 {
+						fallbackSucceeded = true
+					}
+				}
+				if !fallbackSucceeded {
+					errDetail := strings.TrimSpace(stderr)
+					if errDetail != "" && strings.TrimSpace(patchStderr) != "" {
+						errDetail = fmt.Sprintf("%s (api fallback failed: %s)", errDetail, strings.TrimSpace(patchStderr))
+					} else if errDetail == "" {
+						errDetail = strings.TrimSpace(patchStderr)
+					}
+					if errDetail != "" {
+						return nil, fmt.Errorf("failed to edit PR #%s: %s", prNum, errDetail)
+					}
+					if err != nil {
+						return nil, fmt.Errorf("failed to edit PR #%s: %w", prNum, err)
+					}
+					return nil, fmt.Errorf("failed to edit PR #%s: exit code %d", prNum, code)
+				}
 			}
 		} else {
 			if _, _, code, err := RunCmd([]string{"gh", "pr", "create", "--base", opts.TargetBranch, "--head", opts.StagingBranch, "--title", prTitle, "--body", prBody}, repoRoot); err != nil || code != 0 {
