@@ -56,3 +56,15 @@ jobs:
         if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         run: |
           npm run build --if-present
+
+      - name: Update Outstanding Bot PRs
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BOT_PRS=$(gh pr list --head "bot/" --state open --json number -q '.[].number' 2>/dev/null || true)
+          for pr in $BOT_PRS; do
+            echo "Updating bot PR #$pr with latest main..."
+            gh api --method PUT "repos/${{ github.repository }}/pulls/$pr/update-branch" || true
+          done
+
