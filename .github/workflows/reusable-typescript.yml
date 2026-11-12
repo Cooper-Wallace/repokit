@@ -70,7 +70,22 @@ jobs:
           BOT_PRS=$(gh api "repos/${{ github.repository }}/pulls?state=open" --jq '.[] | select(.head.ref | startswith("bot/")) | .number' 2>/dev/null || true)
           for pr in $BOT_PRS; do
             echo "Updating bot PR #$pr with latest main..."
-            gh api --method PUT "repos/${{ github.repository }}/pulls/$pr/update-branch" || true
+            if ! gh api --method PUT "repos/${{ github.repository }}/pulls/$pr/update-branch" 2>/dev/null; then
+              echo "update-branch failed (likely merge conflict); rebasing bot PR #$pr onto origin/main..."
+              HEAD_REF=$(gh api "repos/${{ github.repository }}/pulls/$pr" --jq '.head.ref' 2>/dev/null || true)
+              if [ -n "$HEAD_REF" ]; then
+                git config user.name "github-actions[bot]"
+                git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                git fetch origin main "$HEAD_REF"
+                git checkout -B "$HEAD_REF" "origin/$HEAD_REF"
+                if git rebase -X theirs origin/main; then
+                  git push --force-with-lease origin "$HEAD_REF" || true
+                else
+                  git rebase --abort || true
+                fi
+                git checkout main || true
+              fi
+            fi
             sleep 2
             NEW_SHA=$(gh api "repos/${{ github.repository }}/pulls/$pr" --jq '.head.sha' 2>/dev/null || true)
             if [ -n "$NEW_SHA" ]; then

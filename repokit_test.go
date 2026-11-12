@@ -4761,6 +4761,9 @@ func TestArchetypeWorkflowPermissionsAndBotPRHydration(t *testing.T) {
 			if !strings.Contains(content, "statuses: write") {
 				t.Errorf("%s missing statuses: write", path)
 			}
+			if !strings.Contains(content, "git rebase -X theirs origin/main") {
+				t.Errorf("%s missing git rebase -X theirs origin/main fallback", path)
+			}
 		})
 	}
 }
