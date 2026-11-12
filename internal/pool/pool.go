@@ -1,4 +1,4 @@
-package repokit
+package pool
 
 import (
 	"context"
@@ -81,7 +81,7 @@ func (p *WorkerPool[T, R]) Run(ctx context.Context, items []T) []PoolResult[T, R
 		for i, item := range items {
 			results[i] = PoolResult[T, R]{
 				Item: item,
-				Err:  errors.New("repokit: worker pool task function is nil"),
+				Err:  errors.New("pool: worker pool task function is nil"),
 			}
 		}
 		return results

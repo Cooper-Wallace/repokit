@@ -1,8 +1,9 @@
-package repokit
+package netutil
 
 import (
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,7 +17,7 @@ func TestCheckGitHubConnectivity_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cleanup := setConnectivityURL(server.URL)
+	cleanup := SetConnectivityURLForTesting(server.URL)
 	defer cleanup()
 
 	connected := CheckGitHubConnectivity(500 * time.Millisecond)
@@ -51,7 +52,7 @@ func TestCheckGitHubConnectivity_StatusCodes(t *testing.T) {
 			}))
 			defer server.Close()
 
-			cleanup := setConnectivityURL(server.URL)
+			cleanup := SetConnectivityURLForTesting(server.URL)
 			defer cleanup()
 
 			got := CheckGitHubConnectivity(500 * time.Millisecond)
@@ -77,7 +78,7 @@ func TestCheckGitHubConnectivity_HeadFailure_GetFallback(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cleanup := setConnectivityURL(server.URL)
+	cleanup := SetConnectivityURLForTesting(server.URL)
 	defer cleanup()
 
 	got := CheckGitHubConnectivity(500 * time.Millisecond)
@@ -93,7 +94,7 @@ func TestCheckGitHubConnectivity_Timeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cleanup := setConnectivityURL(server.URL)
+	cleanup := SetConnectivityURLForTesting(server.URL)
 	defer cleanup()
 
 	// Short timeout should expire
@@ -108,7 +109,7 @@ func TestCheckGitHubConnectivity_ClosedServer(t *testing.T) {
 	closedURL := server.URL
 	server.Close() // Close immediately
 
-	cleanup := setConnectivityURL(closedURL)
+	cleanup := SetConnectivityURLForTesting(closedURL)
 	defer cleanup()
 
 	got := CheckGitHubConnectivity(200 * time.Millisecond)
@@ -123,7 +124,7 @@ func TestCheckGitHubConnectivity_DefaultTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cleanup := setConnectivityURL(server.URL)
+	cleanup := SetConnectivityURLForTesting(server.URL)
 	defer cleanup()
 
 	// 0 or negative timeout should use default 1500ms
@@ -158,4 +159,34 @@ func TestIsOfflineMode(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSetConnectivityURLForTesting_Concurrent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	const iterations = 50
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			cleanup := SetConnectivityURLForTesting(server.URL)
+			_ = GetConnectivityURL()
+			cleanup()
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			_ = GetConnectivityURL()
+			time.Sleep(1 * time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
 }

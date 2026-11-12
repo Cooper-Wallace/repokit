@@ -1,4 +1,4 @@
-package repokit
+package platform
 
 import (
 	"bytes"
@@ -304,4 +304,3 @@ func TestWriteFileAtomic_ConcurrentSameFile(t *testing.T) {
 		}
 	}
 }
-

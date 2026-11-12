@@ -1,4 +1,4 @@
-package repokit
+package pool
 
 import (
 	"bytes"
@@ -403,6 +403,28 @@ func TestSynchronizedLog(t *testing.T) {
 			if err != nil || n != 4 || g1 != g2 || i1 != i2 {
 				t.Errorf("line %d interleaved or malformed: %q", lineNum, line)
 			}
+		}
+	})
+}
+
+func TestWorkerPool_UnclampedDirectStruct(t *testing.T) {
+	dummyFn := func(ctx context.Context, item int) (int, error) {
+		return item, nil
+	}
+
+	t.Run("direct zero workers defaults to 4", func(t *testing.T) {
+		p := &WorkerPool[int, int]{workers: 0, fn: dummyFn}
+		results := p.Run(context.Background(), []int{1, 2})
+		if len(results) != 2 || results[0].Value != 1 {
+			t.Errorf("unexpected results: %+v", results)
+		}
+	})
+
+	t.Run("direct excessive workers clamped to 16", func(t *testing.T) {
+		p := &WorkerPool[int, int]{workers: 99, fn: dummyFn}
+		results := p.Run(context.Background(), []int{1, 2})
+		if len(results) != 2 || results[0].Value != 1 {
+			t.Errorf("unexpected results: %+v", results)
 		}
 	})
 }

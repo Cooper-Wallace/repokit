@@ -1,4 +1,4 @@
-package repokit
+package netutil
 
 import (
 	"net/http"
@@ -13,15 +13,15 @@ var (
 	connectivityURL = "https://api.github.com"
 )
 
-// getConnectivityURL returns the target URL for connectivity checks.
-func getConnectivityURL() string {
+// GetConnectivityURL returns the target URL for connectivity checks.
+func GetConnectivityURL() string {
 	connectivityMu.RLock()
 	defer connectivityMu.RUnlock()
 	return connectivityURL
 }
 
-// setConnectivityURL temporarily overrides the connectivity URL for testing and returns a cleanup func.
-func setConnectivityURL(urlStr string) func() {
+// SetConnectivityURLForTesting temporarily overrides the connectivity URL for testing and returns a cleanup func.
+func SetConnectivityURLForTesting(urlStr string) func() {
 	connectivityMu.Lock()
 	old := connectivityURL
 	connectivityURL = urlStr
@@ -33,6 +33,11 @@ func setConnectivityURL(urlStr string) func() {
 	}
 }
 
+// setConnectivityURL provides package-internal backward compatibility for test helpers.
+func setConnectivityURL(urlStr string) func() {
+	return SetConnectivityURLForTesting(urlStr)
+}
+
 // CheckGitHubConnectivity probes GitHub connectivity using standard library net/http.
 // If timeout <= 0, it defaults to 1500ms.
 // It sends a HEAD request (with GET fallback) to https://api.github.com with
@@ -40,7 +45,7 @@ func setConnectivityURL(urlStr string) func() {
 // Returns true if response is received with status code < 500.
 // Returns false on network errors, DNS errors, connection refusal, timeout, or status code >= 500.
 func CheckGitHubConnectivity(timeout time.Duration) bool {
-	return checkConnectivityEndpoint(getConnectivityURL(), timeout)
+	return checkConnectivityEndpoint(GetConnectivityURL(), timeout)
 }
 
 func checkConnectivityEndpoint(targetURL string, timeout time.Duration) bool {

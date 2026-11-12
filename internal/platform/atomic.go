@@ -1,4 +1,4 @@
-package repokit
+package platform
 
 import (
 	"errors"

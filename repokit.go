@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Cooper-Wallace/repokit/internal/netutil"
+	"github.com/Cooper-Wallace/repokit/internal/platform"
+	"github.com/Cooper-Wallace/repokit/internal/pool"
+	"github.com/Cooper-Wallace/repokit/internal/update"
 )
 
 // Terminal ANSI color constants.
@@ -345,14 +351,109 @@ func isCommandRunnerMocked() bool {
 	return CommandRunner != nil && reflect.ValueOf(CommandRunner).Pointer() != reflect.ValueOf(defaultCommandRunner).Pointer()
 }
 
-// SetGitHubLatestReleaseURLForTesting overrides the release endpoint for testing purposes.
-func SetGitHubLatestReleaseURLForTesting(u string) func() {
-	return setGitHubLatestReleaseURL(u)
+// Version is the current version of repokit.
+const Version = update.Version
+
+// Type aliases and definitions for internal packages ensuring full backward compatibility.
+type UpdateOptions = update.UpdateOptions
+type UpdateInfo = update.UpdateInfo
+type TaskFunc[T any, R any] pool.TaskFunc[T, R]
+type PoolResult[T any, R any] pool.PoolResult[T, R]
+type WorkerPool[T any, R any] pool.WorkerPool[T, R]
+
+// NewWorkerPool creates a new generic WorkerPool with bounded concurrency delegating to internal/pool.
+func NewWorkerPool[T any, R any](workers int, fn TaskFunc[T, R]) *pool.WorkerPool[T, R] {
+	return pool.NewWorkerPool(workers, pool.TaskFunc[T, R](fn))
 }
 
-// SetConnectivityURLForTesting temporarily overrides the connectivity URL for testing.
-func SetConnectivityURLForTesting(u string) func() {
-	return setConnectivityURL(u)
+// SynchronizedLog ensures multi-line console logs do not interleave across concurrent workers.
+func SynchronizedLog(fn func()) {
+	pool.SynchronizedLog(fn)
+}
+
+// CheckGitHubConnectivity probes network reachability to GitHub endpoints.
+func CheckGitHubConnectivity(timeout time.Duration) bool {
+	return netutil.CheckGitHubConnectivity(timeout)
+}
+
+// IsOfflineMode checks if REPOKIT_OFFLINE environment variable is active.
+func IsOfflineMode() bool {
+	return netutil.IsOfflineMode()
+}
+
+// SetConnectivityURLForTesting temporarily overrides the connectivity URL for testing and returns a cleanup func.
+func SetConnectivityURLForTesting(url string) func() {
+	return netutil.SetConnectivityURLForTesting(url)
+}
+
+// WriteFileAtomic writes data to filePath atomically via staging and rename.
+func WriteFileAtomic(filePath string, data []byte, perm os.FileMode) error {
+	return platform.WriteFileAtomic(filePath, data, perm)
+}
+
+// BackupAndReplace atomically creates a .bak backup and replaces the target file.
+func BackupAndReplace(filePath string, data []byte, perm os.FileMode) error {
+	return platform.BackupAndReplace(filePath, data, perm)
+}
+
+// BuildShellCommand returns the platform-appropriate shell binary and arguments.
+func BuildShellCommand(cmdStr string) (string, []string) {
+	return platform.BuildShellCommand(cmdStr)
+}
+
+// EnsureExecutable ensures execute permissions are enabled on target file.
+func EnsureExecutable(path string) error {
+	return platform.EnsureExecutable(path)
+}
+
+// NormalizePath standardizes filepath separators for cross-platform consistency.
+func NormalizePath(path string) string {
+	return platform.NormalizePath(path)
+}
+
+// GetPlatformOS returns the current runtime operating system.
+func GetPlatformOS() string {
+	return platform.GetPlatformOS()
+}
+
+// GetPlatformArch returns the current runtime architecture.
+func GetPlatformArch() string {
+	return platform.GetPlatformArch()
+}
+
+// IsWindows reports whether the runtime operating system is Windows.
+func IsWindows() bool {
+	return platform.IsWindows()
+}
+
+// IsMacOS reports whether the runtime operating system is macOS (Darwin).
+func IsMacOS() bool {
+	return platform.IsMacOS()
+}
+
+// IsLinux reports whether the runtime operating system is Linux.
+func IsLinux() bool {
+	return platform.IsLinux()
+}
+
+// CheckForUpdate queries the GitHub Releases API for the latest repokit release.
+func CheckForUpdate(currentVersion string, client *http.Client) (*UpdateInfo, error) {
+	return update.CheckForUpdate(currentVersion, client)
+}
+
+// ExecuteSelfUpdate performs an in-place self-update of the repokit binary.
+func ExecuteSelfUpdate(opts UpdateOptions) (*UpdateInfo, error) {
+	return update.ExecuteSelfUpdate(opts)
+}
+
+// SetGitHubLatestReleaseURLForTesting overrides the release endpoint for testing purposes.
+func SetGitHubLatestReleaseURLForTesting(url string) func() {
+	return update.SetGitHubLatestReleaseURLForTesting(url)
+}
+
+// SetTargetPlatformForTesting overrides target OS and architecture for testing.
+func SetTargetPlatformForTesting(osName, archName string) func() {
+	return update.SetTargetPlatformForTesting(osName, archName)
 }
 
 // File system helpers
