@@ -1,4 +1,4 @@
-package repokit
+package update
 
 import (
 	"archive/tar"
@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +29,31 @@ var (
 	targetOS               = runtime.GOOS
 	targetArch             = runtime.GOARCH
 	executablePathFunc     = os.Executable
+	semverRe               = regexp.MustCompile(`^v?([0-9]+)\.([0-9]+)\.([0-9]+)$`)
 )
+
+// ParseSemVer parses a semver tag (e.g. "v1.2.3" or "1.2.3") into major, minor, patch integers.
+func ParseSemVer(tag string) (major, minor, patch int, ok bool) {
+	tag = strings.TrimSpace(tag)
+	m := semverRe.FindStringSubmatch(tag)
+	if len(m) != 4 {
+		return 0, 0, 0, false
+	}
+	var err error
+	major, err = strconv.Atoi(m[1])
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	minor, err = strconv.Atoi(m[2])
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	patch, err = strconv.Atoi(m[3])
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	return major, minor, patch, true
+}
 
 func getGitHubLatestReleaseURL() string {
 	updateMu.RLock()
@@ -35,7 +61,8 @@ func getGitHubLatestReleaseURL() string {
 	return githubLatestReleaseURL
 }
 
-func setGitHubLatestReleaseURL(u string) func() {
+// SetGitHubLatestReleaseURLForTesting overrides the release endpoint for testing purposes and returns a cleanup function.
+func SetGitHubLatestReleaseURLForTesting(u string) func() {
 	updateMu.Lock()
 	old := githubLatestReleaseURL
 	githubLatestReleaseURL = u
@@ -47,10 +74,19 @@ func setGitHubLatestReleaseURL(u string) func() {
 	}
 }
 
+func setGitHubLatestReleaseURL(u string) func() {
+	return SetGitHubLatestReleaseURLForTesting(u)
+}
+
 func getTargetPlatform() (string, string) {
 	updateMu.RLock()
 	defer updateMu.RUnlock()
 	return targetOS, targetArch
+}
+
+// SetTargetPlatformForTesting overrides target OS and architecture for testing.
+func SetTargetPlatformForTesting(osName, archName string) func() {
+	return setTargetPlatform(osName, archName)
 }
 
 func setTargetPlatform(osName, archName string) func() {

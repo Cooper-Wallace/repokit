@@ -1,4 +1,4 @@
-package repokit
+package update
 
 import (
 	"archive/tar"
@@ -56,6 +56,35 @@ func createTestZipArchive(binaryName string, content []byte) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func TestParseSemVer(t *testing.T) {
+	tests := []struct {
+		tag       string
+		wantMaj   int
+		wantMin   int
+		wantPatch int
+		wantOk    bool
+	}{
+		{tag: "v1.2.3", wantMaj: 1, wantMin: 2, wantPatch: 3, wantOk: true},
+		{tag: "1.2.3", wantMaj: 1, wantMin: 2, wantPatch: 3, wantOk: true},
+		{tag: "v0.0.1", wantMaj: 0, wantMin: 0, wantPatch: 1, wantOk: true},
+		{tag: "  v10.20.30  ", wantMaj: 10, wantMin: 20, wantPatch: 30, wantOk: true},
+		{tag: "invalid", wantMaj: 0, wantMin: 0, wantPatch: 0, wantOk: false},
+		{tag: "1.2", wantMaj: 0, wantMin: 0, wantPatch: 0, wantOk: false},
+		{tag: "1.2.3.4", wantMaj: 0, wantMin: 0, wantPatch: 0, wantOk: false},
+		{tag: "", wantMaj: 0, wantMin: 0, wantPatch: 0, wantOk: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.tag, func(t *testing.T) {
+			maj, min, patch, ok := ParseSemVer(tt.tag)
+			if ok != tt.wantOk || maj != tt.wantMaj || min != tt.wantMin || patch != tt.wantPatch {
+				t.Errorf("ParseSemVer(%q) = (%d, %d, %d, %v); want (%d, %d, %d, %v)",
+					tt.tag, maj, min, patch, ok, tt.wantMaj, tt.wantMin, tt.wantPatch, tt.wantOk)
+			}
+		})
+	}
 }
 
 func TestCheckForUpdate_UpdateAvailable(t *testing.T) {
@@ -378,10 +407,6 @@ func TestExecuteSelfUpdate_SuccessfulUpdate_TarGz(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Update asset URLs to point to mock server
-	cleanup := setGitHubLatestReleaseURL(server.URL + "/releases/latest")
-	defer cleanup()
-
 	// Intercept relative download URLs
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -409,6 +434,9 @@ func TestExecuteSelfUpdate_SuccessfulUpdate_TarGz(t *testing.T) {
 		}
 	})
 	server.Config.Handler = serverHandler
+
+	cleanup := setGitHubLatestReleaseURL(server.URL + "/releases/latest")
+	defer cleanup()
 
 	opts := UpdateOptions{
 		TargetVersion: "1.3.0",
@@ -789,4 +817,110 @@ func TestExecuteSelfUpdate_MissingChecksums(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error when checksums.txt is missing, got nil")
 	}
+}
+
+func TestSetTargetPlatformForTesting(t *testing.T) {
+	cleanup := SetTargetPlatformForTesting("darwin", "arm64")
+	defer cleanup()
+
+	osName, archName := getTargetPlatform()
+	if osName != "darwin" || archName != "arm64" {
+		t.Errorf("got (%s, %s); want (darwin, arm64)", osName, archName)
+	}
+}
+
+func TestExtractBinary_UnsupportedFormat(t *testing.T) {
+	err := extractBinary("dummy.rar", "dummy.rar", "repokit", "/tmp/out")
+	if err == nil {
+		t.Errorf("expected error for unsupported archive format, got nil")
+	}
+}
+
+func TestExtractBinaryFromTarGz_MissingBinary(t *testing.T) {
+	tmpDir := t.TempDir()
+	archiveBytes, err := createTestTarGzArchive("wrong_binary", []byte("data"))
+	if err != nil {
+		t.Fatalf("failed to create tar.gz: %v", err)
+	}
+	archivePath := filepath.Join(tmpDir, "archive.tar.gz")
+	if err := os.WriteFile(archivePath, archiveBytes, 0644); err != nil {
+		t.Fatalf("failed to write archive: %v", err)
+	}
+
+	destPath := filepath.Join(tmpDir, "extracted")
+	err = extractBinaryFromTarGz(archivePath, "repokit", destPath)
+	if err == nil {
+		t.Errorf("expected error when binary missing in tar.gz, got nil")
+	}
+}
+
+func TestExtractBinaryFromZip_MissingBinary(t *testing.T) {
+	tmpDir := t.TempDir()
+	archiveBytes, err := createTestZipArchive("wrong_binary", []byte("data"))
+	if err != nil {
+		t.Fatalf("failed to create zip: %v", err)
+	}
+	archivePath := filepath.Join(tmpDir, "archive.zip")
+	if err := os.WriteFile(archivePath, archiveBytes, 0644); err != nil {
+		t.Fatalf("failed to write archive: %v", err)
+	}
+
+	destPath := filepath.Join(tmpDir, "extracted")
+	err = extractBinaryFromZip(archivePath, "repokit", destPath)
+	if err == nil {
+		t.Errorf("expected error when binary missing in zip, got nil")
+	}
+}
+
+func TestCopyFileAndChmod(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "src.bin")
+	dst := filepath.Join(tmpDir, "dst.bin")
+
+	content := []byte("executable-content")
+	if err := os.WriteFile(src, content, 0755); err != nil {
+		t.Fatalf("failed to write src: %v", err)
+	}
+
+	if err := copyFileAndChmod(src, dst, 0755); err != nil {
+		t.Fatalf("copyFileAndChmod failed: %v", err)
+	}
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("failed to read dst: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Errorf("got %q, want %q", string(got), string(content))
+	}
+}
+
+func TestReplaceExecutable_NonExistentSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "target")
+	err := replaceExecutable(filepath.Join(tmpDir, "does-not-exist"), target)
+	if err == nil {
+		t.Errorf("expected error for non-existent source binary, got nil")
+	}
+}
+
+func TestParseChecksum_EdgeCases(t *testing.T) {
+	t.Run("empty and comment lines", func(t *testing.T) {
+		content := "# Comment line\n\n   \nabcdef1234567890 *myasset.tar.gz\n"
+		hash, err := parseChecksum(content, "myasset.tar.gz")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if hash != "abcdef1234567890" {
+			t.Errorf("got %s, want abcdef1234567890", hash)
+		}
+	})
+
+	t.Run("asset not found", func(t *testing.T) {
+		content := "abcdef1234567890 other.tar.gz\n"
+		_, err := parseChecksum(content, "missing.tar.gz")
+		if err == nil {
+			t.Errorf("expected error when asset not found, got nil")
+		}
+	})
 }
