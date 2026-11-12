@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.0 (2026-11-12)
+
+### Features
+
+* **core:** implement go-native repokit design uplifts (#29) (cdaa0ab)
+* **propagation:** implement fast-failing poller, issue routing, and bot PR auto-rebase (#28) (afe17c2)
+
 ## 1.3.0 (2026-11-06)
 
 ### Features
