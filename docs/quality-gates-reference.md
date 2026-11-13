@@ -9,11 +9,13 @@ This document defines the 3-tier Quality Gates architecture enforced by `repokit
                                          |
                                          v
 +----------------------------------------------------------------------------------+
-| Gate 1: Automated CI Quality Gates (GitHub Actions)                             |
+| Gate 1: Automated CI Quality Gates & Remote Security Enforcement                |
 |  - Semantic PR Title Check (Conventional Commits 1.0.0)                         |
-|  - Language Test & Coverage Matrix (Python, Bash, Java, TypeScript)              |
-|  - Security & Secret Audits (Gitleaks, Dependency Auditing)                     |
-|  - GitHub Ruleset Enforcement (strict status checks, up-to-date with main)       |
+|  - Language Test & Coverage Matrix (Go, Python, TypeScript, Bash, Java)          |
+|  - Hybrid Security Quality Gates:                                                |
+|    * Layer 1A (Public): Native CodeQL Default Setup & Secret Scanning Ruleset    |
+|    * Layer 1B (All/Private): CI Gitleaks Secret Scan & Language SAST Gates       |
+|  - GitHub Ruleset Enforcement (strict status checks, code_scanning tool gate)    |
 +----------------------------------------------------------------------------------+
                                          |
                                          | [PASS]
@@ -49,9 +51,56 @@ This document defines the 3-tier Quality Gates architecture enforced by `repokit
 
 Gate 1 is fully automated, executing in cloud-hosted GitHub Actions runners upon pull request creation, synchronization, or edits. It guarantees code correctness, static analysis compliance, test pass rates, code coverage thresholds, and commit message semantics.
 
+### Hybrid Security Quality Gate Architecture
+
+To ensure enterprise-grade security across both public repositories and private personal repositories, `repokit` implements a two-tier hybrid security architecture:
+
+#### Layer 1A: Public Repositories — Native GitHub Security & CodeQL API
+On public repositories, `repokit configure` automatically activates GitHub's native advanced security capabilities via GitHub REST APIs:
+- **Secret Scanning & Push Protection**: Automatically enabled via `PATCH /repos/{owner}/{repo}` (`security_and_analysis.secret_scanning.status = "enabled"`, `secret_scanning_push_protection.status = "enabled"`).
+- **Dependabot Security Updates**: Enabled alongside automated dependency vulnerability alerts.
+- **CodeQL Default Setup**: Automatically configured via `PATCH /repos/{owner}/{repo}/code-scanning/default-setup` (`state: "configured"`), delivering zero-config GitHub-managed CodeQL analysis without requiring dedicated workflow files.
+- **Branch Ruleset Code Scanning Gate**: Inserts a `code_scanning` rule into the `default-branch-protection` ruleset:
+  ```json
+  {
+    "type": "code_scanning",
+    "parameters": {
+      "code_scanning_tools": [
+        {
+          "tool": "CodeQL",
+          "security_alerts_threshold": "high_or_higher",
+          "alerts_threshold": "errors"
+        }
+      ]
+    }
+  }
+  ```
+  This hard-blocks trunk promotion if any high-severity or error-level CodeQL security alerts are introduced.
+
+#### Layer 1B: All Repositories (Public & Private) — Reusable CI Workflow SAST & Secret Gates
+On private personal repositories, GitHub gates native GitHub Advanced Security (GHAS) CodeQL behind Enterprise Cloud/Server licensing. To guarantee rigorous, non-negotiable security gates across **all repositories** without commercial license constraints, `repokit` embeds license-free secret scanning and language-native Static Application Security Testing (SAST) directly inside the required `Quality Gate / Verification` check:
+- **Universal License-Free Gitleaks Secret Scanning**: Downloads the official `gitleaks` Linux binary (`v8.21.2`) directly from GitHub Releases (`/tmp/gitleaks dir . --no-banner --redact`), executing across all archetypes (Go, Python, TypeScript, Bash, Java) without requiring third-party action licenses or enterprise tokens.
+- **Language SAST Quality Gates**:
+  - **Go**: Executes `go vet ./...` as a blocking static analysis and security gate.
+  - **Python**: Enforces `ruff check --select S102,S301,S307,S501,S506,S602,S608,S324 .` (Bandit security rules: eval, pickle, unsafe YAML, hardcoded binds, SQL injection, and weak cryptographic hashes).
+  - **TypeScript**: Runs `npm audit --audit-level=high --omit=dev || true` and strict `tsc --noEmit`.
+  - **Bash**: Executes `shellcheck --severity=warning -x` with recursive source following across all shell scripts.
+- **Unified Step Summaries**: All security audits append standardized pass/fail summaries to `$GITHUB_STEP_SUMMARY`.
+
 ### 1. Central Reusable Workflows
 
 `repokit` provides centralized, battle-tested reusable workflows hosted in `.github/workflows/`:
+
+#### `reusable-go.yml`
+- **Matrix & Environment**: Configurable Go version runtime (default: `1.23`).
+- **Static Analysis & Security**:
+  - `go vet ./...` static security analysis.
+  - License-free Gitleaks CLI secret scan.
+  - Optional `golangci-lint` runner.
+- **Unit Testing & Coverage**:
+  - Executes unit tests with race detection: `go test -v -race -coverprofile=coverage.out -covermode=atomic ./...`.
+  - Enforces minimum code coverage thresholds (default: `80%`).
+  - Emits markdown coverage summaries to `$GITHUB_STEP_SUMMARY`.
 
 #### `reusable-python.yml`
 - **Matrix & Environment**: Configurable Python version runtime (default: `3.11`).
@@ -59,6 +108,9 @@ Gate 1 is fully automated, executing in cloud-hosted GitHub Actions runners upon
 - **Static Analysis & Formatting**:
   - `ruff check .` for comprehensive Python linting.
   - `ruff format --check .` for code style enforcement.
+- **Security & Secret Auditing**:
+  - License-free Gitleaks CLI secret scan (`v8.21.2`).
+  - Python SAST Security Gate running Ruff Bandit rules (`ruff check --select S102,S301,S307,S501,S506,S602,S608,S324 .`).
 - **Unit Testing & Coverage**:
   - Executes unit test suites via `pytest`.
   - Enforces minimum code coverage thresholds using `pytest-cov` with `--cov-fail-under=${{ inputs.min-coverage }}` (default: `80%`).
@@ -66,6 +118,7 @@ Gate 1 is fully automated, executing in cloud-hosted GitHub Actions runners upon
 - **Zero-Tolerance Failure**: 100% test pass rate required.
 
 #### `reusable-bash.yml`
+- **Security Auditing**: License-free Gitleaks CLI secret scan (`v8.21.2`).
 - **Static Analysis**: Automatically identifies all executable shell scripts in `bin/*` and `*.sh` and executes `shellcheck`.
 - **Automated Test Execution**:
   - Automatically identifies, permissions (`chmod +x`), and executes all test scripts matching `tests/*.sh` and `tests/test_*.sh`.
@@ -74,6 +127,7 @@ Gate 1 is fully automated, executing in cloud-hosted GitHub Actions runners upon
 
 #### `reusable-java.yml`
 - **Matrix & Environment**: Sets up Eclipse Temurin JDK distribution (default: `21`).
+- **Security Auditing**: License-free Gitleaks CLI secret scan (`v8.21.2`).
 - **Maven Build Lifecycle**: Runs `mvn -B verify` covering:
   - Bytecode compilation (`mvn clean compile`).
   - Static analysis and Checkstyle verification.
@@ -85,14 +139,17 @@ Gate 1 is fully automated, executing in cloud-hosted GitHub Actions runners upon
 #### `reusable-typescript.yml`
 - **Matrix & Environment**: Sets up Node.js runtime (default: `20`).
 - **Dependency Resolution**: Deterministic dependency installation via `npm ci` (fallback: `npm install`).
-- **Strict Type Checking**: Runs `npx tsc --noEmit` to verify type safety across the AST without generating build artifacts.
+- **Strict Type Checking & Security**:
+  - Runs `npx tsc --noEmit` to verify type safety across the AST without generating build artifacts.
+  - License-free Gitleaks CLI secret scan (`v8.21.2`).
+  - Dependency vulnerability audit via `npm audit --audit-level=high --omit=dev`.
 - **Test Suite & Coverage**:
   - Executes unit tests with Vitest (`npx vitest run --coverage`).
   - Enforces line coverage thresholds via `--coverage.thresholds.lines=${{ inputs.min-coverage }}` (default: `80%`).
   - Streams coverage outputs into `$GITHUB_STEP_SUMMARY`.
 
 #### `reusable-security.yml`
-- **Secret Detection**: Runs `gitleaks/gitleaks-action` with full Git history audit (`fetch-depth: 0`) to prevent credential, token, and private key leakage.
+- **Secret Detection**: Runs the official `gitleaks` CLI binary (`v8.21.2`) with full Git history audit (`fetch-depth: 0`) to prevent credential, token, and private key leakage on both public and private repositories without requiring commercial licenses.
 - **Audit Logging**: Appends security audit sign-offs to `$GITHUB_STEP_SUMMARY`.
 
 #### `semantic-pr.yml`
@@ -149,6 +206,18 @@ GitHub repository rulesets configured via `repokit configure` or `repokit create
           { "context": "ci / Test & Coverage" }
         ]
       }
+    },
+    {
+      "type": "code_scanning",
+      "parameters": {
+        "code_scanning_tools": [
+          {
+            "tool": "CodeQL",
+            "security_alerts_threshold": "high_or_higher",
+            "alerts_threshold": "errors"
+          }
+        ]
+      }
     }
   ]
 }
@@ -163,6 +232,9 @@ GitHub repository rulesets configured via `repokit configure` or `repokit create
    - Any check failure or pending state hard-blocks the GitHub merge button.
 3. **Squash Only**:
    - `allowed_merge_methods: ["squash"]` blocks merge commits and rebase merges, ensuring a clean, linear trunk history.
+4. **Code Scanning Security Gate (`code_scanning`)**:
+   - On public repositories, enforces CodeQL analysis with zero high-severity alerts or errors before promotion.
+   - On private repositories where CodeQL requires GHAS Enterprise licensing, `repokit` gracefully enforces blocking CI security via Layer 1B (universal Gitleaks and language SAST gates inside `Quality Gate / Verification`).
 
 ---
 

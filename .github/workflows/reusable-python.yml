@@ -64,6 +64,21 @@ jobs:
           ruff check .
           ruff format --check .
 
+      - name: Run Gitleaks Secret Audit
+        if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
+        run: |
+          GITLEAKS_VERSION="8.21.2"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /tmp gitleaks
+          /tmp/gitleaks dir . --no-banner --redact
+          echo "### Security & Secret Audit" >> "$GITHUB_STEP_SUMMARY"
+          echo "- :shield: **Gitleaks Secret Scan**: Passed (0 leaked secrets detected)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run Python SAST Security Gate (Ruff Bandit)
+        if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
+        run: |
+          ruff check --select S102,S301,S307,S501,S506,S602,S608,S324 .
+          echo "- :lock: **Python SAST (\`ruff --select S\` Bandit rules)**: Passed (0 high-severity findings)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run pytest with coverage
         if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         run: |
