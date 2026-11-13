@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.1 (2026-11-13)
+
+### Bug Fixes
+
+* **ci:** add git rebase theirs fallback for conflicting bot prs (#34) (232b3bd)
+* **core:** harden release pr editing, issue labels, and workflow templates (#33) (2d0433f)
+
+### Performance & Refactoring
+
+* **core:** modularize root domain files into internal packages (#31) (27bfba1)
+
 ## 1.4.0 (2026-11-12)
 
 ### Features
