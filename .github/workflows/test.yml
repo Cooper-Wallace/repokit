@@ -38,6 +38,15 @@ jobs:
         if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         run: go vet ./...
 
+      - name: Run Gitleaks Secret Audit
+        if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
+        run: |
+          GITLEAKS_VERSION="8.21.2"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /tmp gitleaks
+          /tmp/gitleaks dir . --no-banner --redact
+          echo "### Security & Secret Audit" >> "$GITHUB_STEP_SUMMARY"
+          echo "- :shield: **Gitleaks Secret Scan**: Passed (0 leaked secrets detected)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run repokit tests with coverage
         if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
