@@ -2,6 +2,7 @@ package repokit
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -713,7 +714,7 @@ func TestApplyBranchRuleset(t *testing.T) {
 		}
 
 		rules := payload["rules"].([]interface{})
-		var hasStatusChecks, hasPRSquash bool
+		var hasStatusChecks, hasPRSquash, hasCodeScanning bool
 		for _, r := range rules {
 			rMap := r.(map[string]interface{})
 			if rMap["type"] == "pull_request" {
@@ -734,12 +735,27 @@ func TestApplyBranchRuleset(t *testing.T) {
 					}
 				}
 			}
+			if rMap["type"] == "code_scanning" {
+				if params, ok := rMap["parameters"].(map[string]interface{}); ok {
+					if tools, ok := params["code_scanning_tools"].([]interface{}); ok && len(tools) == 1 {
+						t0, _ := tools[0].(map[string]interface{})
+						if t0["tool"] == "CodeQL" &&
+							t0["security_alerts_threshold"] == "high_or_higher" &&
+							t0["alerts_threshold"] == "errors" {
+							hasCodeScanning = true
+						}
+					}
+				}
+			}
 		}
 		if !hasPRSquash {
 			t.Errorf("Expected pull_request rule with squash merge method")
 		}
 		if !hasStatusChecks {
 			t.Errorf("Expected required_status_checks rule with Quality Gate checks")
+		}
+		if !hasCodeScanning {
+			t.Errorf("Expected code_scanning rule with CodeQL")
 		}
 	})
 
@@ -801,6 +817,49 @@ func TestApplyBranchRuleset(t *testing.T) {
 		}
 		if len(calls) != 0 {
 			t.Errorf("Expected 0 gh calls for exempt vault repo, got %d", len(calls))
+		}
+	})
+
+	t.Run("fallback_without_code_scanning_on_private_repo", func(t *testing.T) {
+		var calls [][]string
+		var lastPayload map[string]interface{}
+		var postCount int
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			calls = append(calls, args)
+			joined := strings.Join(args, " ")
+			if strings.Contains(joined, "--method POST") || strings.Contains(joined, "--method PUT") {
+				postCount++
+				if postCount == 1 {
+					// First attempt fails with code_scanning not supported
+					return "", "HTTP 422: Rule type code_scanning is not supported for this repository", 1, errors.New("exit status 1")
+				}
+				// Second attempt (fallback retry) succeeds
+				_ = json.Unmarshal([]byte(input), &lastPayload)
+				return "{}", "", 0, nil
+			}
+			// GET rulesets
+			return "[]", "", 0, nil
+		}
+
+		err := ApplyBranchRuleset("Cooper-Wallace/private-repo", "~DEFAULT_BRANCH", nil)
+		if err != nil {
+			t.Fatalf("Expected fallback retry to succeed, got %v", err)
+		}
+
+		if postCount != 2 {
+			t.Fatalf("Expected 2 POST calls (fail then fallback), got %d", postCount)
+		}
+
+		rules, ok := lastPayload["rules"].([]interface{})
+		if !ok {
+			t.Fatalf("Expected rules in fallback payload")
+		}
+		for _, r := range rules {
+			rMap := r.(map[string]interface{})
+			if rMap["type"] == "code_scanning" {
+				t.Errorf("Fallback payload should not contain code_scanning rule: %v", rMap)
+			}
 		}
 	})
 }
@@ -878,6 +937,185 @@ func TestIsProfileRepo(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplySecurityAndAnalysis(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	t.Run("public_repo_success", func(t *testing.T) {
+		var capturedArgs []string
+		var capturedInput string
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			capturedArgs = args
+			capturedInput = input
+			return "{}", "", 0, nil
+		}
+
+		err := ApplySecurityAndAnalysis("Cooper-Wallace/test-repo")
+		if err != nil {
+			t.Fatalf("Expected ApplySecurityAndAnalysis to succeed, got %v", err)
+		}
+
+		joined := strings.Join(capturedArgs, " ")
+		if !strings.Contains(joined, "gh api --method PATCH repos/Cooper-Wallace/test-repo") {
+			t.Errorf("Unexpected command args: %v", capturedArgs)
+		}
+
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(capturedInput), &payload); err != nil {
+			t.Fatalf("Failed to parse PATCH payload: %v", err)
+		}
+
+		sec, ok := payload["security_and_analysis"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Payload missing security_and_analysis: %v", payload)
+		}
+		ss, _ := sec["secret_scanning"].(map[string]interface{})
+		ssp, _ := sec["secret_scanning_push_protection"].(map[string]interface{})
+		dep, _ := sec["dependabot_security_updates"].(map[string]interface{})
+
+		if ss["status"] != "enabled" {
+			t.Errorf("Expected secret_scanning status 'enabled', got %v", ss["status"])
+		}
+		if ssp["status"] != "enabled" {
+			t.Errorf("Expected secret_scanning_push_protection status 'enabled', got %v", ssp["status"])
+		}
+		if dep["status"] != "enabled" {
+			t.Errorf("Expected dependabot_security_updates status 'enabled', got %v", dep["status"])
+		}
+	})
+
+	t.Run("private_repo_safe_degrade", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			return "", "HTTP 422: Secret scanning is not available for this private repository", 1, errors.New("exit status 1")
+		}
+
+		err := ApplySecurityAndAnalysis("Cooper-Wallace/private-repo")
+		if err != nil {
+			t.Errorf("Expected safe degrade to return nil error, got: %v", err)
+		}
+	})
+
+	t.Run("unexpected_api_error", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			return "", "HTTP 500: Internal Server Error", 1, errors.New("exit status 1")
+		}
+
+		err := ApplySecurityAndAnalysis("Cooper-Wallace/test-repo")
+		if err == nil {
+			t.Errorf("Expected unexpected API error to fail, but got nil")
+		}
+	})
+}
+
+func TestApplyCodeScanningDefaultSetup(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	t.Run("consumer_public_repo_configures_default", func(t *testing.T) {
+		var patchInput string
+		var patchCalled bool
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			joined := strings.Join(args, " ")
+			if strings.Contains(joined, "--method PATCH") {
+				patchCalled = true
+				patchInput = input
+				return "{}", "", 0, nil
+			}
+			return `{"state":"not-configured","languages":["actions","python"]}`, "", 0, nil
+		}
+
+		configured, err := ApplyCodeScanningDefaultSetup("Cooper-Wallace/consumer-repo")
+		if err != nil {
+			t.Fatalf("Expected ApplyCodeScanningDefaultSetup to succeed, got %v", err)
+		}
+		if !configured {
+			t.Errorf("Expected configured=true, got %v", configured)
+		}
+		if !patchCalled {
+			t.Fatalf("Expected PATCH to be called")
+		}
+
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(patchInput), &payload); err != nil {
+			t.Fatalf("Failed to parse patch payload: %v", err)
+		}
+		if payload["state"] != "configured" {
+			t.Errorf("Expected state 'configured', got %v", payload["state"])
+		}
+		if payload["query_suite"] != "default" {
+			t.Errorf("Expected query_suite 'default', got %v", payload["query_suite"])
+		}
+		if _, ok := payload["languages"]; ok {
+			t.Errorf("Expected languages to not be overridden for consumer repo, got %v", payload["languages"])
+		}
+	})
+
+	t.Run("governance_hub_filters_languages", func(t *testing.T) {
+		var patchInput string
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			joined := strings.Join(args, " ")
+			if strings.Contains(joined, "--method PATCH") {
+				patchInput = input
+				return "{}", "", 0, nil
+			}
+			return `{"state":"not-configured","languages":["actions","go","python","java"]}`, "", 0, nil
+		}
+
+		configured, err := ApplyCodeScanningDefaultSetup("Cooper-Wallace/repokit")
+		if err != nil {
+			t.Fatalf("Expected ApplyCodeScanningDefaultSetup to succeed, got %v", err)
+		}
+		if !configured {
+			t.Errorf("Expected configured=true, got %v", configured)
+		}
+
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(patchInput), &payload); err != nil {
+			t.Fatalf("Failed to parse patch payload: %v", err)
+		}
+		languages, ok := payload["languages"].([]interface{})
+		if !ok || len(languages) != 2 || languages[0] != "actions" || languages[1] != "go" {
+			t.Errorf("Expected languages ['actions', 'go'], got %v", payload["languages"])
+		}
+	})
+
+	t.Run("private_repo_403_safe_degrade", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			return "", "Code scanning is not enabled for this repository (HTTP 403)", 1, errors.New("exit status 1")
+		}
+
+		configured, err := ApplyCodeScanningDefaultSetup("Cooper-Wallace/private-repo")
+		if err != nil {
+			t.Errorf("Expected error to be nil on safe degrade, got %v", err)
+		}
+		if configured {
+			t.Errorf("Expected configured=false on safe degrade, got %v", configured)
+		}
+	})
+
+	t.Run("exempt_vault_repo_skipped", func(t *testing.T) {
+		callCount := 0
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			callCount++
+			return "{}", "", 0, nil
+		}
+
+		configured, err := ApplyCodeScanningDefaultSetup("Cooper-Wallace/AgentVault")
+		if err != nil {
+			t.Errorf("Expected error to be nil for exempt vault repo, got %v", err)
+		}
+		if configured {
+			t.Errorf("Expected configured=false for exempt vault repo, got %v", configured)
+		}
+		if callCount != 0 {
+			t.Errorf("Expected 0 API calls for exempt vault repo, got %d", callCount)
+		}
+	})
 }
 
 func TestAuditRepositoryRemote(t *testing.T) {
@@ -1158,6 +1396,125 @@ func TestAuditRepositoryRemote(t *testing.T) {
 		passed, err := AuditRepository(consumerTmp, "", false, true)
 		if err != nil || !passed {
 			t.Errorf("Expected consumer repo remote audit to pass with allow_auto_merge=true, got passed=%v, err=%v", passed, err)
+		}
+	})
+
+	t.Run("public_repo_security_and_codeql_gates_pass", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit" {
+				data := map[string]interface{}{
+					"visibility":                  "public",
+					"allow_squash_merge":          true,
+					"allow_merge_commit":          false,
+					"allow_rebase_merge":          false,
+					"delete_branch_on_merge":      true,
+					"squash_merge_commit_title":   "PR_TITLE",
+					"squash_merge_commit_message": "PR_BODY",
+					"allow_auto_merge":            false,
+					"security_and_analysis": map[string]interface{}{
+						"secret_scanning":                 map[string]interface{}{"status": "enabled"},
+						"secret_scanning_push_protection": map[string]interface{}{"status": "enabled"},
+					},
+				}
+				bytes, _ := json.Marshal(data)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/code-scanning/default-setup" {
+				return `{"state": "configured"}`, "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/rulesets" {
+				rulesets := []map[string]interface{}{
+					{
+						"name":        "default-branch-protection",
+						"enforcement": "active",
+						"rules": []map[string]interface{}{
+							{
+								"type": "required_status_checks",
+								"parameters": map[string]interface{}{
+									"required_status_checks": []map[string]string{
+										{"context": "Test & Coverage"},
+									},
+								},
+							},
+							{
+								"type": "code_scanning",
+							},
+						},
+					},
+				}
+				bytes, _ := json.Marshal(rulesets)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/actions/permissions/workflow" {
+				return `{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": true}`, "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		passed, err := AuditRepository(tmpDir, "", false, true)
+		if err != nil || !passed {
+			t.Errorf("Expected public repo remote audit to pass, got passed=%v, err=%v", passed, err)
+		}
+	})
+
+	t.Run("public_repo_missing_codeql_fails", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit" {
+				data := map[string]interface{}{
+					"visibility":                  "public",
+					"allow_squash_merge":          true,
+					"allow_merge_commit":          false,
+					"allow_rebase_merge":          false,
+					"delete_branch_on_merge":      true,
+					"squash_merge_commit_title":   "PR_TITLE",
+					"squash_merge_commit_message": "PR_BODY",
+					"allow_auto_merge":            false,
+					"security_and_analysis": map[string]interface{}{
+						"secret_scanning":                 map[string]interface{}{"status": "enabled"},
+						"secret_scanning_push_protection": map[string]interface{}{"status": "enabled"},
+					},
+				}
+				bytes, _ := json.Marshal(data)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/code-scanning/default-setup" {
+				return `{"state": "not-configured"}`, "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/rulesets" {
+				rulesets := []map[string]interface{}{
+					{
+						"name":        "default-branch-protection",
+						"enforcement": "active",
+						"rules": []map[string]interface{}{
+							{
+								"type": "required_status_checks",
+								"parameters": map[string]interface{}{
+									"required_status_checks": []map[string]string{
+										{"context": "Test & Coverage"},
+									},
+								},
+							},
+							{
+								"type": "code_scanning",
+							},
+						},
+					},
+				}
+				bytes, _ := json.Marshal(rulesets)
+				return string(bytes), "", 0, nil
+			}
+			if len(args) > 2 && args[2] == "repos/Cooper-Wallace/repokit/actions/permissions/workflow" {
+				return `{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": true}`, "", 0, nil
+			}
+			return defaultCommandRunner(args, dir, input)
+		}
+
+		passed, err := AuditRepository(tmpDir, "", false, true)
+		if err != nil {
+			t.Fatalf("AuditRepository returned unexpected error: %v", err)
+		}
+		if passed {
+			t.Errorf("Expected public repo remote audit to fail when CodeQL is not configured, got passed=true")
 		}
 	})
 }
@@ -4623,6 +4980,7 @@ func TestConfigureMultipleRepositories_Deduplication(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(repoDir, ".git"), 0755)
 
 	apiRepoSettingsCalls := 0
+	apiSecuritySettingsCalls := 0
 	apiWorkflowPermsCalls := 0
 	apiBranchRulesetCalls := 0
 
@@ -4638,8 +4996,18 @@ func TestConfigureMultipleRepositories_Deduplication(t *testing.T) {
 		}
 		if len(args) >= 3 && args[0] == "gh" && args[1] == "api" {
 			joined := strings.Join(args, " ")
+			if strings.Contains(joined, "code-scanning/default-setup") {
+				return "{}", "", 0, nil
+			}
 			if strings.Contains(joined, "--method PATCH repos/org/repo-dedup") {
-				apiRepoSettingsCalls++
+				if strings.Contains(input, "allow_squash_merge") {
+					apiRepoSettingsCalls++
+					return "{}", "", 0, nil
+				}
+				if strings.Contains(input, "security_and_analysis") {
+					apiSecuritySettingsCalls++
+					return "{}", "", 0, nil
+				}
 				return "{}", "", 0, nil
 			}
 			if strings.Contains(joined, "actions/permissions/workflow") {
@@ -4670,6 +5038,9 @@ func TestConfigureMultipleRepositories_Deduplication(t *testing.T) {
 
 	if apiRepoSettingsCalls != 1 {
 		t.Errorf("Expected ApplyGitHubRepoSettings to be called exactly 1 time, got %d", apiRepoSettingsCalls)
+	}
+	if apiSecuritySettingsCalls != 1 {
+		t.Errorf("Expected ApplySecurityAndAnalysis to be called exactly 1 time, got %d", apiSecuritySettingsCalls)
 	}
 	if apiWorkflowPermsCalls != 1 {
 		t.Errorf("Expected ApplyWorkflowPermissions to be called exactly 1 time, got %d", apiWorkflowPermsCalls)
