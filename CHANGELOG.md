@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.1 (2026-11-26)
+
+### Bug Fixes
+
+* **workflows:** decouple bot PR hydration from CI and enforce governance ownership (#39) (2cd36f6)
+* **ruleset:** gate code_scanning rule on CodeQL baseline readiness (#37) (f129ab0)
+
 ## 1.5.0 (2026-11-26)
 
 ### Features
