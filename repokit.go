@@ -804,6 +804,98 @@ func IsVaultOrExemptRepo(slug string) bool {
 	return repoName == "agentvault" || repoName == "agent-vault"
 }
 
+func ApplySecurityAndAnalysis(repoSlug string) error {
+	LogInfo("Configuring GitHub security and analysis settings for %s...", repoSlug)
+	payload := map[string]interface{}{
+		"security_and_analysis": map[string]interface{}{
+			"secret_scanning":                 map[string]string{"status": "enabled"},
+			"secret_scanning_push_protection": map[string]string{"status": "enabled"},
+			"dependabot_security_updates":     map[string]string{"status": "enabled"},
+		},
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	stdout, stderr, code, err := RunCmdWithInput([]string{
+		"gh", "api", "--method", "PATCH", fmt.Sprintf("repos/%s", repoSlug), "--input", "-",
+	}, "", string(payloadBytes))
+
+	if code == 0 {
+		LogSuccess("GitHub security settings enabled (Secret Scanning, Push Protection, Dependabot Security Updates).")
+		return nil
+	}
+
+	errCombined := strings.ToLower(fmt.Sprintf("%s %s %v", stderr, stdout, err))
+	if strings.Contains(errCombined, "403") ||
+		strings.Contains(errCombined, "422") ||
+		strings.Contains(errCombined, "404") ||
+		strings.Contains(errCombined, "not available") ||
+		strings.Contains(errCombined, "not enabled") ||
+		strings.Contains(errCombined, "security_and_analysis") ||
+		strings.Contains(errCombined, "public") ||
+		strings.Contains(errCombined, "advanced security") {
+		LogInfo("Native GitHub secret scanning / push protection not available for %s (relying on CI workflow SAST & Gitleaks gates).", repoSlug)
+		return nil
+	}
+
+	LogWarn("Failed to configure security settings on %s: %s", repoSlug, strings.TrimSpace(stderr))
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("gh api security settings returned exit code %d: %s", code, strings.TrimSpace(stderr))
+}
+
+func ApplyCodeScanningDefaultSetup(repoSlug string) (bool, error) {
+	if IsVaultOrExemptRepo(repoSlug) {
+		return false, nil
+	}
+	LogInfo("Checking CodeQL code scanning default setup for %s...", repoSlug)
+	stdout, _, code, err := RunCmd([]string{"gh", "api", fmt.Sprintf("repos/%s/code-scanning/default-setup", repoSlug)}, "")
+	if code != 0 || err != nil {
+		LogInfo("CodeQL default setup not available for %s (private repository or GHAS not enabled); relying on CI workflow SAST gates.", repoSlug)
+		return false, nil
+	}
+
+	var setupData map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &setupData); err != nil {
+		return false, nil
+	}
+	if setupData["state"] == nil {
+		return false, nil
+	}
+
+	patchPayload := map[string]interface{}{
+		"state":       "configured",
+		"query_suite": "default",
+	}
+
+	isHub := strings.EqualFold(repoSlug, DefaultGovernanceRepo) || strings.EqualFold(repoSlug, "Cooper-Wallace/repokit") || strings.HasSuffix(strings.ToLower(repoSlug), "/repokit")
+	if isHub {
+		patchPayload["languages"] = []string{"actions", "go"}
+	}
+
+	patchBytes, err := json.Marshal(patchPayload)
+	if err != nil {
+		return false, err
+	}
+
+	_, patchErr, patchCode, pErr := RunCmdWithInput([]string{
+		"gh", "api", "--method", "PATCH", fmt.Sprintf("repos/%s/code-scanning/default-setup", repoSlug), "--input", "-",
+	}, "", string(patchBytes))
+
+	if patchCode == 0 {
+		LogSuccess("CodeQL code scanning default setup configured on %s.", repoSlug)
+		return true, nil
+	}
+
+	LogWarn("Could not configure CodeQL default setup on %s: %s", repoSlug, strings.TrimSpace(patchErr))
+	if pErr != nil {
+		return false, pErr
+	}
+	return false, fmt.Errorf("code-scanning default-setup returned exit code %d: %s", patchCode, strings.TrimSpace(patchErr))
+}
+
 func ApplyBranchRuleset(repoSlug string, defaultBranch string, requiredChecks []string) error {
 	if IsVaultOrExemptRepo(repoSlug) {
 		LogInfo("Skipping branch protection ruleset and CI scaffolding for exempt vault repository %s", repoSlug)
@@ -891,6 +983,18 @@ func ApplyBranchRuleset(repoSlug string, defaultBranch string, requiredChecks []
 					"required_status_checks":              checksPayload,
 				},
 			},
+			{
+				"type": "code_scanning",
+				"parameters": map[string]interface{}{
+					"code_scanning_tools": []map[string]interface{}{
+						{
+							"tool":                      "CodeQL",
+							"security_alerts_threshold": "high_or_higher",
+							"alerts_threshold":          "errors",
+						},
+					},
+				},
+			},
 		},
 	}
 
@@ -910,6 +1014,24 @@ func ApplyBranchRuleset(repoSlug string, defaultBranch string, requiredChecks []
 	}
 
 	stdoutRule, stderrRule, codeRule, err := RunCmdWithInput(cmdArgs, "", string(payloadBytes))
+	if codeRule != 0 {
+		combined := strings.ToLower(stderrRule + " " + stdoutRule)
+		if strings.Contains(combined, "code_scanning") || strings.Contains(combined, "code scanning") || strings.Contains(combined, "advanced security") {
+			LogInfo("Code scanning ruleset rule not supported on %s; retrying branch ruleset with required status checks only...", repoSlug)
+			if rules, ok := payload["rules"].([]map[string]interface{}); ok {
+				var fallbackRules []map[string]interface{}
+				for _, r := range rules {
+					if r["type"] != "code_scanning" {
+						fallbackRules = append(fallbackRules, r)
+					}
+				}
+				payload["rules"] = fallbackRules
+				if fallbackBytes, marshalErr := json.Marshal(payload); marshalErr == nil {
+					stdoutRule, stderrRule, codeRule, err = RunCmdWithInput(cmdArgs, "", string(fallbackBytes))
+				}
+			}
+		}
+	}
 	if codeRule == 0 {
 		LogSuccess("Branch protection ruleset active (blocks direct pushes/force pushes, allows solo PR merge).")
 		return nil
@@ -1300,6 +1422,7 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 		stdoutRules, _, codeRules, _ := RunCmd([]string{"gh", "api", fmt.Sprintf("repos/%s/rulesets", slug)}, "")
 		hasRuleset := false
 		rulesetHasStatusChecks := false
+		rulesetHasCodeScanning := false
 		if codeRules == 0 && stdoutRules != "" {
 			var rulesets []map[string]interface{}
 			if err := json.Unmarshal([]byte(stdoutRules), &rulesets); err == nil {
@@ -1322,6 +1445,9 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 						}
 						for _, ruleRaw := range rules {
 							if ruleMap, ok := ruleRaw.(map[string]interface{}); ok {
+								if ruleMap["type"] == "code_scanning" {
+									rulesetHasCodeScanning = true
+								}
 								if ruleMap["type"] == "required_status_checks" {
 									if params, ok := ruleMap["parameters"].(map[string]interface{}); ok {
 										if reqChecks, ok := params["required_status_checks"].([]interface{}); ok {
@@ -1343,7 +1469,6 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 									} else {
 										rulesetHasStatusChecks = true
 									}
-									break
 								}
 							}
 						}
@@ -1362,6 +1487,32 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 			}
 		}
 
+		visibility, _ := ghData["visibility"].(string)
+		isPublic := strings.EqualFold(visibility, "public")
+
+		var secretScanningEnabled bool
+		var codeqlConfigured bool
+
+		if isPublic {
+			if secAnalysis, ok := ghData["security_and_analysis"].(map[string]interface{}); ok && secAnalysis != nil {
+				ss, _ := secAnalysis["secret_scanning"].(map[string]interface{})
+				ssPush, _ := secAnalysis["secret_scanning_push_protection"].(map[string]interface{})
+				if ss != nil && ssPush != nil {
+					secretScanningEnabled = fmt.Sprintf("%v", ss["status"]) == "enabled" && fmt.Sprintf("%v", ssPush["status"]) == "enabled"
+				}
+			}
+
+			stdoutCS, _, codeCS, _ := RunCmd([]string{"gh", "api", fmt.Sprintf("repos/%s/code-scanning/default-setup", slug)}, "")
+			if codeCS == 0 && stdoutCS != "" {
+				var csData map[string]interface{}
+				if err := json.Unmarshal([]byte(stdoutCS), &csData); err == nil {
+					if state, ok := csData["state"].(string); ok && state == "configured" {
+						codeqlConfigured = true
+					}
+				}
+			}
+		}
+
 		remoteItems = []CheckItem{
 			{Label: "Default Branch is 'main'", Passed: defaultBranchPassed},
 			{Label: "Squash & Merge Enabled", Passed: squashEnabled},
@@ -1374,6 +1525,14 @@ func AuditRepository(repoRoot string, archetype string, localOnly bool, remoteOn
 			{Label: "Default Branch Protection Ruleset Active", Passed: hasRuleset},
 			{Label: "Branch Ruleset Enforces Required Status Checks", Passed: rulesetHasStatusChecks},
 			{Label: "GitHub Actions Permitted to Create/Approve PRs (Workflow Permissions)", Passed: canApprovePRs},
+		}
+
+		if isPublic {
+			remoteItems = append(remoteItems,
+				CheckItem{Label: "GitHub Secret Scanning & Push Protection Enabled", Passed: secretScanningEnabled},
+				CheckItem{Label: "CodeQL Code Scanning Default Setup Configured", Passed: codeqlConfigured},
+				CheckItem{Label: "Branch Ruleset Enforces CodeQL Security Gate", Passed: rulesetHasCodeScanning},
+			)
 		}
 	}
 
@@ -1649,6 +1808,8 @@ func CreateRepository(name string, description string, public bool, templateType
 	}
 
 	_ = ApplyGitHubRepoSettings(slug)
+	_ = ApplySecurityAndAnalysis(slug)
+	_, _ = ApplyCodeScanningDefaultSetup(slug)
 	_ = ApplyWorkflowPermissions(slug)
 	_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil)
 
@@ -1792,6 +1953,7 @@ func configureSingleRepository(opts ConfigureOptions) error {
 	if opts.DryRun {
 		if !opts.Offline {
 			LogInfo("[DRY RUN] Would apply remote GitHub repo settings to %s", slug)
+			LogInfo("[DRY RUN] Would apply security and CodeQL default setup to %s", slug)
 			LogInfo("[DRY RUN] Would apply workflow permissions to %s", slug)
 			LogInfo("[DRY RUN] Would apply branch protection ruleset to %s", slug)
 		}
@@ -1808,6 +1970,8 @@ func configureSingleRepository(opts ConfigureOptions) error {
 
 	if !opts.Offline {
 		_ = ApplyGitHubRepoSettings(slug)
+		_ = ApplySecurityAndAnalysis(slug)
+		_, _ = ApplyCodeScanningDefaultSetup(slug)
 		_ = ApplyWorkflowPermissions(slug)
 		_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil)
 	}
@@ -2045,6 +2209,7 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 			SynchronizedLog(func() {
 				if !opts.Offline {
 					LogInfo("[DRY RUN] Would apply remote GitHub repo settings to %s", slug)
+					LogInfo("[DRY RUN] Would apply security and CodeQL default setup to %s", slug)
 					LogInfo("[DRY RUN] Would apply workflow permissions to %s", slug)
 					LogInfo("[DRY RUN] Would apply branch protection ruleset to %s", slug)
 				}
@@ -2067,6 +2232,8 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 					LogWarn("Failed to apply GitHub repo settings for %s: %v", slug, err)
 				})
 			}
+			_ = ApplySecurityAndAnalysis(slug)
+			_, _ = ApplyCodeScanningDefaultSetup(slug)
 			if err := ApplyWorkflowPermissions(slug); err != nil {
 				SynchronizedLog(func() {
 					LogWarn("Failed to apply workflow permissions for %s: %v", slug, err)

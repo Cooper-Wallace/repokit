@@ -34,6 +34,9 @@ For solo developers, engineers, and researchers, pushing directly to `main` with
   - Installs an executable `.git/hooks/pre-commit` hook that audits repository structure before commits.
 - **Automated CI Quality Gates**:
   - Scaffolds `.github/workflows/semantic-pr.yml` to ensure PR titles strictly adhere to Conventional Commits.
+- **Hybrid Security & CodeQL Quality Gates (Public & Private Repos)**:
+  - **Layer 1A (Public Repositories — Native GitHub Security & CodeQL API)**: Automatically enables GitHub Secret Scanning, Push Protection, Dependabot Security Updates, zero-config CodeQL Default Setup (`PATCH /repos/{owner}/{repo}/code-scanning/default-setup`), and ruleset `code_scanning` security gate (`tool: "CodeQL"`, `security_alerts_threshold: "high_or_higher"`, `alerts_threshold: "errors"`).
+  - **Layer 1B (All Repositories — Reusable CI SAST & Secret Gates)**: Enforces license-free Gitleaks CLI secret scanning (`v8.21.2`) and language SAST (`ruff --select S` Bandit rules, `go vet`, `shellcheck`, `npm audit`) inside the required `Quality Gate / Verification` check across all archetypes, with automatic graceful fallback on private personal repositories where GitHub gates native GHAS CodeQL behind Enterprise licensing.
 - **Native Release Staging & Promotion Engine**:
   - Replaces external release actions with a native, zero-dependency release engine.
   - Automatically calculates SemVer increments from Conventional Commits.
@@ -125,6 +128,9 @@ GitHub Remote Governance Standards:
   ✔ Auto-Merge Disabled (Human Gate)
   ✔ Default Branch Protection Ruleset Active
   ✔ Branch Ruleset Enforces Required Status Checks
+  ✔ GitHub Secret Scanning & Push Protection Enabled
+  ✔ CodeQL Code Scanning Default Setup Configured
+  ✔ Branch Ruleset Enforces CodeQL Security Gate
 
 Local Repository Standards:
   ✔ Local Conventional Commit Hook Installed (.git/hooks/commit-msg)
