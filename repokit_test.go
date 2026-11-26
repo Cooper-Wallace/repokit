@@ -5298,45 +5298,103 @@ func TestArchetypeWorkflowPermissionsAndBotPRHydration(t *testing.T) {
 				t.Fatalf("Failed to read %s: %v", path, err)
 			}
 			content := string(data)
-			if !strings.Contains(content, "contents: write") {
-				t.Errorf("%s missing contents: write", path)
+			if !strings.Contains(content, "contents: read") {
+				t.Errorf("%s missing contents: read", path)
 			}
-			if !strings.Contains(content, "pull-requests: write") {
-				t.Errorf("%s missing pull-requests: write", path)
+			if !strings.Contains(content, "pull-requests: read") {
+				t.Errorf("%s missing pull-requests: read", path)
 			}
-			if !strings.Contains(content, "statuses: write") {
-				t.Errorf("%s missing statuses: write", path)
+			if strings.Contains(content, "contents: write") {
+				t.Errorf("%s must not contain contents: write", path)
+			}
+			if strings.Contains(content, "pull-requests: write") {
+				t.Errorf("%s must not contain pull-requests: write", path)
+			}
+			if strings.Contains(content, "statuses: write") {
+				t.Errorf("%s must not contain statuses: write", path)
 			}
 			if !strings.Contains(content, "secrets: inherit") {
 				t.Errorf("%s missing secrets: inherit", path)
 			}
 		})
 
-		t.Run("reusable_"+arch+"_bot_hydration", func(t *testing.T) {
+		t.Run("reusable_"+arch+"_least_privilege", func(t *testing.T) {
 			path := filepath.Join(".github", "workflows", "reusable-"+arch+".yml")
 			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatalf("Failed to read %s: %v", path, err)
 			}
 			content := string(data)
-			if !strings.Contains(content, `startswith("bot/")`) {
-				t.Errorf("%s missing startswith(\"bot/\")", path)
+			if !strings.Contains(content, "contents: read") {
+				t.Errorf("%s missing contents: read", path)
 			}
-			if strings.Contains(content, `--head "bot/"`) {
-				t.Errorf("%s still contains --head \"bot/\"", path)
+			if strings.Contains(content, "contents: write") {
+				t.Errorf("%s must not contain contents: write (causes @v1 startup_failure)", path)
 			}
-			if !strings.Contains(content, "contents: write") {
-				t.Errorf("%s missing contents: write", path)
+			if strings.Contains(content, "pull-requests: write") {
+				t.Errorf("%s must not contain pull-requests: write", path)
 			}
-			if !strings.Contains(content, "pull-requests: write") {
-				t.Errorf("%s missing pull-requests: write", path)
+			if strings.Contains(content, "statuses: write") {
+				t.Errorf("%s must not contain statuses: write", path)
 			}
-			if !strings.Contains(content, "statuses: write") {
-				t.Errorf("%s missing statuses: write", path)
-			}
-			if !strings.Contains(content, "git rebase -X theirs origin/main") {
-				t.Errorf("%s missing git rebase -X theirs origin/main fallback", path)
+			if strings.Contains(content, "Update Outstanding Bot PRs") {
+				t.Errorf("%s must not contain Update Outstanding Bot PRs", path)
 			}
 		})
 	}
+
+	t.Run("reusable_release_prep_bot_hydration", func(t *testing.T) {
+		path := filepath.Join(".github", "workflows", "reusable-release-prep.yml")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("Failed to read %s: %v", path, err)
+		}
+		content := string(data)
+		required := []string{
+			"Update Outstanding Bot PRs",
+			`startswith("bot/")`,
+			"git rebase -X theirs origin/main",
+			`gh pr merge "$pr" --auto --squash --delete-branch`,
+			"contents: write",
+			"pull-requests: write",
+			"statuses: write",
+		}
+		for _, needle := range required {
+			if !strings.Contains(content, needle) {
+				t.Errorf("%s missing %s", path, needle)
+			}
+		}
+	})
+
+	t.Run("semantic_pr_governance_ownership_guard", func(t *testing.T) {
+		path := filepath.Join(".github", "workflows", "semantic-pr.yml")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("Failed to read %s: %v", path, err)
+		}
+		content := string(data)
+		if !strings.Contains(content, "pull-requests: read") {
+			t.Errorf("%s missing pull-requests: read", path)
+		}
+		for _, forbidden := range []string{"contents: write", "pull-requests: write", "statuses: write"} {
+			if strings.Contains(content, forbidden) {
+				t.Errorf("%s must not escalate permissions with %s", path, forbidden)
+			}
+		}
+		required := []string{
+			"Enforce Repokit Governance Ownership",
+			".github/workflows/ci.yml",
+			".github/workflows/release.yml",
+			".github/workflows/sync.yml",
+			".github/workflows/semantic-pr.yml",
+			".github/pull_request_template.md",
+			"bot/",
+			"/repokit",
+		}
+		for _, needle := range required {
+			if !strings.Contains(content, needle) {
+				t.Errorf("%s missing %s", path, needle)
+			}
+		}
+	})
 }

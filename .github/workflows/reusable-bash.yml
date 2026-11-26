@@ -8,9 +8,7 @@ jobs:
     name: "Quality Gate / Verification"
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: write
-      statuses: write
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -74,42 +72,4 @@ jobs:
           else
             echo "All $TEST_COUNT test script(s) passed successfully." >> "$GITHUB_STEP_SUMMARY"
           fi
-
-      - name: Update Outstanding Bot PRs
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
-        run: |
-          BOT_PRS=$(gh api "repos/${{ github.repository }}/pulls?state=open" --jq '.[] | select(.head.ref | startswith("bot/")) | .number' 2>/dev/null || true)
-          for pr in $BOT_PRS; do
-            echo "Updating bot PR #$pr with latest main..."
-            if ! gh api --method PUT "repos/${{ github.repository }}/pulls/$pr/update-branch" 2>/dev/null; then
-              echo "update-branch failed (likely merge conflict); rebasing bot PR #$pr onto origin/main..."
-              HEAD_REF=$(gh api "repos/${{ github.repository }}/pulls/$pr" --jq '.head.ref' 2>/dev/null || true)
-              if [ -n "$HEAD_REF" ]; then
-                git config user.name "github-actions[bot]"
-                git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-                git fetch origin main "$HEAD_REF"
-                git checkout -B "$HEAD_REF" "origin/$HEAD_REF"
-                if git rebase -X theirs origin/main; then
-                  git push --force-with-lease origin "$HEAD_REF" || true
-                else
-                  git rebase --abort || true
-                fi
-                git checkout main || true
-              fi
-            fi
-            sleep 2
-            NEW_SHA=$(gh api "repos/${{ github.repository }}/pulls/$pr" --jq '.head.sha' 2>/dev/null || true)
-            if [ -n "$NEW_SHA" ]; then
-              for ctx in "ci / Quality Gate / Verification" "validate-pr / Quality Gate / Title Validation" "Quality Gate / Verification" "Quality Gate / Title Validation"; do
-                gh api --method POST "repos/${{ github.repository }}/statuses/$NEW_SHA" \
-                  -f state=success \
-                  -f context="$ctx" \
-                  -f description="Verified via main branch CI hydration" || true
-              done
-            fi
-            gh pr merge "$pr" --auto --squash --delete-branch --repo "${{ github.repository }}" || true
-          done
 
