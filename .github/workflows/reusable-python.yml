@@ -74,11 +74,11 @@ jobs:
       - name: Run Python SAST Security Gate (Ruff Bandit)
         if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         run: |
-          ruff check --select S102,S301,S307,S501,S506,S602,S608,S324 .
+          ruff check --isolated --select S102,S301,S307,S501,S506,S602,S608,S324 .
           echo "- :lock: **Python SAST (\`ruff --select S\` Bandit rules)**: Passed (0 high-severity findings)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run pytest with coverage
         if: github.head_ref != 'release-staging' && !startsWith(github.head_ref, 'release-')
         run: |
-          pytest --cov=src --cov-report=term --cov-report=markdown-append:"$GITHUB_STEP_SUMMARY" --cov-fail-under=${{ inputs.min-coverage }}
+          pytest -o addopts="" --cov=src --cov-report=term --cov-report=markdown-append:"$GITHUB_STEP_SUMMARY" --cov-fail-under=${{ inputs.min-coverage }}
 

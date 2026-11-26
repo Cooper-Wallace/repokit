@@ -161,29 +161,9 @@ permissions:
   pull-requests: read
 
 jobs:
-  main:
-    name: Validate Conventional Commit PR Title
+  validate-pr:
     if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: amannn/action-semantic-pull-request@v5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          types: |
-            feat
-            fix
-            docs
-            style
-            refactor
-            perf
-            test
-            build
-            ci
-            chore
-            revert
-            release
-          requireScope: false
+    uses: Cooper-Wallace/repokit/.github/workflows/semantic-pr.yml@v1
 `
 
 	GenericReleaseWorkflow = `name: Release
@@ -1043,7 +1023,7 @@ func ApplyBranchRuleset(repoSlug string, defaultBranch string, requiredChecks []
 			{
 				"actor_id":    5,
 				"actor_type":  "RepositoryRole",
-				"bypass_mode": "always",
+				"bypass_mode": "pull_request",
 			},
 		},
 		"conditions": map[string]interface{}{
