@@ -562,8 +562,16 @@ func TestSemanticPRWorkflowPushGuard(t *testing.T) {
 	if !strings.Contains(WorkflowSemanticPR, guard) {
 		t.Errorf("WorkflowSemanticPR constant missing push guard: %s", guard)
 	}
-	if !strings.Contains(WorkflowSemanticPR, "workflow_call:") {
-		t.Errorf("WorkflowSemanticPR constant missing workflow_call:")
+	for _, needle := range []string{
+		"pull_request_target:",
+		"workflow_call:",
+		"pull-requests: read",
+		"validate-pr:",
+		"uses: Cooper-Wallace/repokit/.github/workflows/semantic-pr.yml@v1",
+	} {
+		if !strings.Contains(WorkflowSemanticPR, needle) {
+			t.Errorf("WorkflowSemanticPR constant missing %s", needle)
+		}
 	}
 
 	repoRoot, err := GetGitRepoRoot(".")
@@ -709,8 +717,8 @@ func TestApplyBranchRuleset(t *testing.T) {
 			t.Fatalf("Expected bypass_actors in payload, got %v", payload["bypass_actors"])
 		}
 		actor0 := bypassActors[0].(map[string]interface{})
-		if actor0["actor_id"] != float64(5) || actor0["actor_type"] != "RepositoryRole" || actor0["bypass_mode"] != "always" {
-			t.Errorf("Expected bypass_actors with actor_id: 5 and RepositoryRole, got %v", actor0)
+		if actor0["actor_id"] != float64(5) || actor0["actor_type"] != "RepositoryRole" || actor0["bypass_mode"] != "pull_request" || actor0["bypass_mode"] == "always" {
+			t.Errorf("Expected bypass_actors with actor_id: 5, RepositoryRole, and bypass_mode: pull_request (not always), got %v", actor0)
 		}
 
 		rules := payload["rules"].([]interface{})
@@ -782,8 +790,8 @@ func TestApplyBranchRuleset(t *testing.T) {
 			t.Fatalf("Expected bypass_actors in payload, got %v", payload["bypass_actors"])
 		}
 		actor0 := bypassActors[0].(map[string]interface{})
-		if actor0["actor_id"] != float64(5) || actor0["actor_type"] != "RepositoryRole" || actor0["bypass_mode"] != "always" {
-			t.Errorf("Expected bypass_actors with actor_id: 5 and RepositoryRole, got %v", actor0)
+		if actor0["actor_id"] != float64(5) || actor0["actor_type"] != "RepositoryRole" || actor0["bypass_mode"] != "pull_request" || actor0["bypass_mode"] == "always" {
+			t.Errorf("Expected bypass_actors with actor_id: 5, RepositoryRole, and bypass_mode: pull_request (not always), got %v", actor0)
 		}
 
 		rules := payload["rules"].([]interface{})
@@ -5388,8 +5396,28 @@ func TestArchetypeWorkflowPermissionsAndBotPRHydration(t *testing.T) {
 			".github/workflows/sync.yml",
 			".github/workflows/semantic-pr.yml",
 			".github/pull_request_template.md",
+			".gitleaksignore",
+			".gitleaks.toml",
 			"bot/",
 			"/repokit",
+		}
+		for _, needle := range required {
+			if !strings.Contains(content, needle) {
+				t.Errorf("%s missing %s", path, needle)
+			}
+		}
+	})
+
+	t.Run("reusable_python_ci_isolation", func(t *testing.T) {
+		path := filepath.Join(".github", "workflows", "reusable-python.yml")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("Failed to read %s: %v", path, err)
+		}
+		content := string(data)
+		required := []string{
+			"ruff check --isolated --select S102,S301,S307,S501,S506,S602,S608,S324 .",
+			`pytest -o addopts="" --cov=src`,
 		}
 		for _, needle := range required {
 			if !strings.Contains(content, needle) {
