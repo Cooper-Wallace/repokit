@@ -865,12 +865,37 @@ func ApplyCodeScanningDefaultSetup(repoSlug string) (bool, error) {
 		return false, nil
 	}
 
+	stateStr, _ := setupData["state"].(string)
+	isHub := strings.EqualFold(repoSlug, DefaultGovernanceRepo) || strings.EqualFold(repoSlug, "Cooper-Wallace/repokit") || strings.HasSuffix(strings.ToLower(repoSlug), "/repokit")
+
+	if strings.EqualFold(stateStr, "configured") {
+		if !isHub {
+			LogInfo("CodeQL code scanning default setup already configured on %s.", repoSlug)
+			return true, nil
+		}
+		if langs, ok := setupData["languages"].([]interface{}); ok && len(langs) == 2 {
+			hasActions, hasGo := false, false
+			for _, l := range langs {
+				if s, ok := l.(string); ok {
+					if s == "actions" {
+						hasActions = true
+					} else if s == "go" {
+						hasGo = true
+					}
+				}
+			}
+			if hasActions && hasGo {
+				LogInfo("CodeQL code scanning default setup already configured on %s.", repoSlug)
+				return true, nil
+			}
+		}
+	}
+
 	patchPayload := map[string]interface{}{
 		"state":       "configured",
 		"query_suite": "default",
 	}
 
-	isHub := strings.EqualFold(repoSlug, DefaultGovernanceRepo) || strings.EqualFold(repoSlug, "Cooper-Wallace/repokit") || strings.HasSuffix(strings.ToLower(repoSlug), "/repokit")
 	if isHub {
 		patchPayload["languages"] = []string{"actions", "go"}
 	}
@@ -896,7 +921,35 @@ func ApplyCodeScanningDefaultSetup(repoSlug string) (bool, error) {
 	return false, fmt.Errorf("code-scanning default-setup returned exit code %d: %s", patchCode, strings.TrimSpace(patchErr))
 }
 
-func ApplyBranchRuleset(repoSlug string, defaultBranch string, requiredChecks []string) error {
+// HasCodeScanningBaseline reports whether at least one CodeQL analysis exists for repoSlug.
+func HasCodeScanningBaseline(repoSlug string) bool {
+	if IsVaultOrExemptRepo(repoSlug) {
+		return false
+	}
+	stdout, _, code, err := RunCmd([]string{"gh", "api", fmt.Sprintf("repos/%s/code-scanning/analyses?per_page=1", repoSlug)}, "")
+	if code != 0 || err != nil || strings.TrimSpace(stdout) == "" {
+		return false
+	}
+	var analyses []map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &analyses); err != nil {
+		return false
+	}
+	return len(analyses) > 0
+}
+
+// ShouldEnableCodeScanningRule determines whether the code_scanning ruleset rule should be activated.
+func ShouldEnableCodeScanningRule(repoSlug string, codeQLConfigured bool) bool {
+	if !codeQLConfigured {
+		return false
+	}
+	if HasCodeScanningBaseline(repoSlug) {
+		return true
+	}
+	LogInfo("CodeQL default setup enabled on %s, but no baseline analysis exists yet; deferring code_scanning ruleset gate until initial scan completes.", repoSlug)
+	return false
+}
+
+func ApplyBranchRuleset(repoSlug string, defaultBranch string, requiredChecks []string, enableCodeScanning bool) error {
 	if IsVaultOrExemptRepo(repoSlug) {
 		LogInfo("Skipping branch protection ruleset and CI scaffolding for exempt vault repository %s", repoSlug)
 		return nil
@@ -944,6 +997,44 @@ func ApplyBranchRuleset(repoSlug string, defaultBranch string, requiredChecks []
 		checksPayload[i] = map[string]string{"context": ctx}
 	}
 
+	rules := []map[string]interface{}{
+		{"type": "deletion"},
+		{"type": "non_fast_forward"},
+		{
+			"type": "pull_request",
+			"parameters": map[string]interface{}{
+				"required_approving_review_count":   0,
+				"dismiss_stale_reviews_on_push":     false,
+				"require_code_owner_review":         false,
+				"require_last_push_approval":        false,
+				"required_review_thread_resolution": false,
+				"allowed_merge_methods":             []string{"squash"},
+			},
+		},
+		{
+			"type": "required_status_checks",
+			"parameters": map[string]interface{}{
+				"strict_required_status_checks_policy": true,
+				"do_not_enforce_on_create":             false,
+				"required_status_checks":              checksPayload,
+			},
+		},
+	}
+	if enableCodeScanning {
+		rules = append(rules, map[string]interface{}{
+			"type": "code_scanning",
+			"parameters": map[string]interface{}{
+				"code_scanning_tools": []map[string]interface{}{
+					{
+						"tool":                      "CodeQL",
+						"security_alerts_threshold": "high_or_higher",
+						"alerts_threshold":          "errors",
+					},
+				},
+			},
+		})
+	}
+
 	payload := map[string]interface{}{
 		"name":        "default-branch-protection",
 		"target":      "branch",
@@ -961,41 +1052,7 @@ func ApplyBranchRuleset(repoSlug string, defaultBranch string, requiredChecks []
 				"exclude": []string{},
 			},
 		},
-		"rules": []map[string]interface{}{
-			{"type": "deletion"},
-			{"type": "non_fast_forward"},
-			{
-				"type": "pull_request",
-				"parameters": map[string]interface{}{
-					"required_approving_review_count":   0,
-					"dismiss_stale_reviews_on_push":     false,
-					"require_code_owner_review":         false,
-					"require_last_push_approval":        false,
-					"required_review_thread_resolution": false,
-					"allowed_merge_methods":             []string{"squash"},
-				},
-			},
-			{
-				"type": "required_status_checks",
-				"parameters": map[string]interface{}{
-					"strict_required_status_checks_policy": true,
-					"do_not_enforce_on_create":             false,
-					"required_status_checks":              checksPayload,
-				},
-			},
-			{
-				"type": "code_scanning",
-				"parameters": map[string]interface{}{
-					"code_scanning_tools": []map[string]interface{}{
-						{
-							"tool":                      "CodeQL",
-							"security_alerts_threshold": "high_or_higher",
-							"alerts_threshold":          "errors",
-						},
-					},
-				},
-			},
-		},
+		"rules": rules,
 	}
 
 	payloadBytes, err := json.Marshal(payload)
@@ -1809,9 +1866,10 @@ func CreateRepository(name string, description string, public bool, templateType
 
 	_ = ApplyGitHubRepoSettings(slug)
 	_ = ApplySecurityAndAnalysis(slug)
-	_, _ = ApplyCodeScanningDefaultSetup(slug)
+	codeQLConfigured, _ := ApplyCodeScanningDefaultSetup(slug)
 	_ = ApplyWorkflowPermissions(slug)
-	_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil)
+	enableCodeScanning := ShouldEnableCodeScanningRule(slug, codeQLConfigured)
+	_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil, enableCodeScanning)
 
 	fmt.Println()
 	LogSuccess("New repository %s initialised and fully standardised!", slug)
@@ -1971,9 +2029,10 @@ func configureSingleRepository(opts ConfigureOptions) error {
 	if !opts.Offline {
 		_ = ApplyGitHubRepoSettings(slug)
 		_ = ApplySecurityAndAnalysis(slug)
-		_, _ = ApplyCodeScanningDefaultSetup(slug)
+		codeQLConfigured, _ := ApplyCodeScanningDefaultSetup(slug)
 		_ = ApplyWorkflowPermissions(slug)
-		_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil)
+		enableCodeScanning := ShouldEnableCodeScanningRule(slug, codeQLConfigured)
+		_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil, enableCodeScanning)
 	}
 	_ = ScaffoldLocalRepository(repoRoot, opts.Force)
 
@@ -2233,13 +2292,14 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 				})
 			}
 			_ = ApplySecurityAndAnalysis(slug)
-			_, _ = ApplyCodeScanningDefaultSetup(slug)
+			codeQLConfigured, _ := ApplyCodeScanningDefaultSetup(slug)
 			if err := ApplyWorkflowPermissions(slug); err != nil {
 				SynchronizedLog(func() {
 					LogWarn("Failed to apply workflow permissions for %s: %v", slug, err)
 				})
 			}
-			if err := ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil); err != nil {
+			enableCodeScanning := ShouldEnableCodeScanningRule(slug, codeQLConfigured)
+			if err := ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil, enableCodeScanning); err != nil {
 				SynchronizedLog(func() {
 					LogWarn("Failed to apply branch ruleset for %s: %v", slug, err)
 				})
