@@ -5426,3 +5426,363 @@ func TestArchetypeWorkflowPermissionsAndBotPRHydration(t *testing.T) {
 		}
 	})
 }
+
+func TestUpdateExistingSyncPR(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	t.Run("happy_path", func(t *testing.T) {
+		var viewCalled, patchCalled bool
+		var patchEndpoint, patchInput string
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 7 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" && args[3] == "bot/repokit-sync" {
+				viewCalled = true
+				return `{"number": 6}`, "", 0, nil
+			}
+			if len(args) >= 7 && args[0] == "gh" && args[1] == "api" && args[2] == "--method" && args[3] == "PATCH" {
+				patchCalled = true
+				patchEndpoint = args[4]
+				patchInput = input
+				return `{}`, "", 0, nil
+			}
+			return "", "unexpected command", 1, fmt.Errorf("unexpected command: %v", args)
+		}
+
+		err := UpdateExistingSyncPR("org/repo", "bot/repokit-sync", "ci(repokit): new title", "Release v2.0.0 body")
+		if err != nil {
+			t.Fatalf("Expected UpdateExistingSyncPR to succeed, got: %v", err)
+		}
+		if !viewCalled {
+			t.Errorf("Expected gh pr view to be called")
+		}
+		if !patchCalled {
+			t.Errorf("Expected gh api PATCH to be called")
+		}
+		if patchEndpoint != "repos/org/repo/pulls/6" {
+			t.Errorf("Expected PATCH endpoint repos/org/repo/pulls/6, got %q", patchEndpoint)
+		}
+		var bodyMap map[string]string
+		if err := json.Unmarshal([]byte(patchInput), &bodyMap); err != nil {
+			t.Fatalf("Failed to parse PATCH JSON input: %v", err)
+		}
+		if bodyMap["title"] != "ci(repokit): new title" || bodyMap["body"] != "Release v2.0.0 body" {
+			t.Errorf("Unexpected PATCH payload: %+v", bodyMap)
+		}
+	})
+
+	t.Run("pr_view_fails_skips_patch", func(t *testing.T) {
+		var patchCalled bool
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" {
+				return "", "no pull requests found", 1, nil
+			}
+			if len(args) >= 4 && args[0] == "gh" && args[1] == "api" && args[3] == "PATCH" {
+				patchCalled = true
+			}
+			return "", "", 0, nil
+		}
+
+		err := UpdateExistingSyncPR("org/repo", "bot/repokit-sync", "title", "body")
+		if err == nil {
+			t.Fatalf("Expected error when gh pr view fails")
+		}
+		if patchCalled {
+			t.Errorf("Expected PATCH not to be called when gh pr view fails")
+		}
+	})
+
+	t.Run("pr_view_zero_number_skips_patch", func(t *testing.T) {
+		var patchCalled bool
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" {
+				return `{"number": 0}`, "", 0, nil
+			}
+			if len(args) >= 4 && args[0] == "gh" && args[1] == "api" && args[3] == "PATCH" {
+				patchCalled = true
+			}
+			return "", "", 0, nil
+		}
+
+		err := UpdateExistingSyncPR("org/repo", "bot/repokit-sync", "title", "body")
+		if err == nil {
+			t.Fatalf("Expected error when PR number is 0")
+		}
+		if patchCalled {
+			t.Errorf("Expected PATCH not to be called when PR number is 0")
+		}
+	})
+
+	t.Run("patch_fails_returns_error", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" {
+				return `{"number": 6}`, "", 0, nil
+			}
+			if len(args) >= 4 && args[0] == "gh" && args[1] == "api" && args[3] == "PATCH" {
+				return "", "forbidden", 1, nil
+			}
+			return "", "", 0, nil
+		}
+
+		err := UpdateExistingSyncPR("org/repo", "bot/repokit-sync", "title", "body")
+		if err == nil {
+			t.Fatalf("Expected error when PATCH fails")
+		}
+	})
+}
+
+func TestRefreshStaleOpenPRs(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	t.Run("happy_path_reopens_startup_failure_pr", func(t *testing.T) {
+		var patchPayloads []string
+		var patchEndpoints []string
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) == 3 && args[0] == "gh" && args[1] == "api" && args[2] == "repos/org/repo/pulls?state=open&per_page=20" {
+				return `[{"number": 8, "head": {"ref": "feat/fix", "sha": "abc123"}}]`, "", 0, nil
+			}
+			if len(args) == 3 && args[0] == "gh" && args[1] == "api" && args[2] == "repos/org/repo/actions/runs?head_sha=abc123&per_page=10" {
+				return `{"workflow_runs": [{"conclusion": "startup_failure"}]}`, "", 0, nil
+			}
+			if len(args) >= 7 && args[0] == "gh" && args[1] == "api" && args[2] == "--method" && args[3] == "PATCH" {
+				patchEndpoints = append(patchEndpoints, args[4])
+				patchPayloads = append(patchPayloads, input)
+				return `{}`, "", 0, nil
+			}
+			return "", "unexpected", 1, nil
+		}
+
+		count := RefreshStaleOpenPRs("org/repo")
+		if count != 1 {
+			t.Fatalf("Expected 1 refreshed PR, got %d", count)
+		}
+		if len(patchPayloads) != 2 {
+			t.Fatalf("Expected 2 PATCH calls (close then open), got %d", len(patchPayloads))
+		}
+		if patchEndpoints[0] != "repos/org/repo/pulls/8" || patchEndpoints[1] != "repos/org/repo/pulls/8" {
+			t.Errorf("Unexpected PATCH endpoints: %v", patchEndpoints)
+		}
+		if patchPayloads[0] != `{"state":"closed"}` || patchPayloads[1] != `{"state":"open"}` {
+			t.Errorf("Expected close then open payloads, got: %v", patchPayloads)
+		}
+	})
+
+	t.Run("safe_skip_bot_release_and_non_startup_failure_prs", func(t *testing.T) {
+		var queriedRunSHAs []string
+		var patchCalled bool
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) == 3 && args[0] == "gh" && args[1] == "api" && args[2] == "repos/org/repo/pulls?state=open&per_page=20" {
+				return `[
+					{"number": 1, "head": {"ref": "bot/repokit-sync", "sha": "sha-bot"}},
+					{"number": 2, "head": {"ref": "release-staging", "sha": "sha-rel-staging"}},
+					{"number": 3, "head": {"ref": "release-v1.2.3", "sha": "sha-rel-ver"}},
+					{"number": 4, "head": {"ref": "feat/passing", "sha": "sha-pass"}},
+					{"number": 5, "head": {"ref": "feat/test-fail", "sha": "sha-fail"}}
+				]`, "", 0, nil
+			}
+			if len(args) == 3 && args[0] == "gh" && args[1] == "api" && strings.HasPrefix(args[2], "repos/org/repo/actions/runs?") {
+				queriedRunSHAs = append(queriedRunSHAs, args[2])
+				if strings.Contains(args[2], "head_sha=sha-pass") {
+					return `{"workflow_runs": [{"conclusion": "success"}]}`, "", 0, nil
+				}
+				if strings.Contains(args[2], "head_sha=sha-fail") {
+					return `{"workflow_runs": [{"conclusion": "failure"}]}`, "", 0, nil
+				}
+				return `{"workflow_runs": []}`, "", 0, nil
+			}
+			if len(args) >= 4 && args[0] == "gh" && args[1] == "api" && args[3] == "PATCH" {
+				patchCalled = true
+			}
+			return "", "", 0, nil
+		}
+
+		count := RefreshStaleOpenPRs("org/repo")
+		if count != 0 {
+			t.Fatalf("Expected 0 refreshed PRs, got %d", count)
+		}
+		if patchCalled {
+			t.Errorf("Expected no PATCH calls for skipped/normal PRs")
+		}
+		if len(queriedRunSHAs) != 2 {
+			t.Errorf("Expected runs queried only for the 2 non-bot/non-release PRs, got %d (%v)", len(queriedRunSHAs), queriedRunSHAs)
+		}
+	})
+
+	t.Run("safe_degrade_on_errors_invalid_json_and_exempt_repo", func(t *testing.T) {
+		var apiCalled bool
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			apiCalled = true
+			return "", "network error", 1, nil
+		}
+
+		if got := RefreshStaleOpenPRs("Cooper-Wallace/AgentVault"); got != 0 {
+			t.Errorf("Expected 0 for exempt repo, got %d", got)
+		}
+		if apiCalled {
+			t.Errorf("Expected no API calls for exempt repo")
+		}
+
+		if got := RefreshStaleOpenPRs("org/repo"); got != 0 {
+			t.Errorf("Expected 0 when pulls API fails, got %d", got)
+		}
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			return "{invalid-json", "", 0, nil
+		}
+		if got := RefreshStaleOpenPRs("org/repo"); got != 0 {
+			t.Errorf("Expected 0 when pulls API returns invalid JSON, got %d", got)
+		}
+	})
+}
+
+func TestConfigureSyncPRUpdateAndStaleRefreshWiring(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	t.Run("single_repo_updates_existing_pr_and_refreshes_stale_prs", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		_ = exec.Command("git", "init", "-b", "main", tmpDir).Run()
+		_ = exec.Command("git", "-C", tmpDir, "remote", "add", "origin", "https://github.com/org/single-sync.git").Run()
+
+		var updatedExistingPR, refreshedStalePR, autoMerged bool
+		var updatedBody string
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 0 && args[0] == "git" {
+				for _, a := range args {
+					if a == "push" || a == "checkout" || a == "commit" || a == "add" {
+						return "", "", 0, nil
+					}
+					if a == "status" {
+						return " M README.md\n", "", 0, nil
+					}
+				}
+				return defaultCommandRunner(args, dir, input)
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
+				return "", "a pull request for branch \"bot/repokit-sync\" into branch \"main\" already exists", 1, nil
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" {
+				return `{"number": 42}`, "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
+				autoMerged = true
+				return "", "", 0, nil
+			}
+			if len(args) == 3 && args[0] == "gh" && args[1] == "api" && args[2] == "repos/org/single-sync/pulls?state=open&per_page=20" {
+				return `[{"number": 9, "head": {"ref": "feat/stale", "sha": "deadbeef"}}]`, "", 0, nil
+			}
+			if len(args) == 3 && args[0] == "gh" && args[1] == "api" && args[2] == "repos/org/single-sync/actions/runs?head_sha=deadbeef&per_page=10" {
+				return `{"workflow_runs": [{"conclusion": "startup_failure"}]}`, "", 0, nil
+			}
+			if len(args) >= 7 && args[0] == "gh" && args[1] == "api" && args[2] == "--method" && args[3] == "PATCH" {
+				if args[4] == "repos/org/single-sync/pulls/42" {
+					updatedExistingPR = true
+					updatedBody = input
+				}
+				if args[4] == "repos/org/single-sync/pulls/9" && input == `{"state":"open"}` {
+					refreshedStalePR = true
+				}
+				return "{}", "", 0, nil
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			TargetDir:  tmpDir,
+			CreatePR:   true,
+			ReleaseRef: "v3.1.0",
+		})
+		if err != nil {
+			t.Fatalf("ConfigureWithOptions failed: %v", err)
+		}
+		if !updatedExistingPR {
+			t.Errorf("Expected existing sync PR #42 to be patched via UpdateExistingSyncPR")
+		}
+		if !strings.Contains(updatedBody, "3.1.0") {
+			t.Errorf("Expected patched PR body to contain ReleaseRef 3.1.0, got: %s", updatedBody)
+		}
+		if !refreshedStalePR {
+			t.Errorf("Expected stale open PR #9 to be refreshed via RefreshStaleOpenPRs")
+		}
+		if !autoMerged {
+			t.Errorf("Expected gh pr merge to still be called")
+		}
+	})
+
+	t.Run("multi_repo_updates_existing_pr_and_refreshes_stale_prs", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		repoDir := filepath.Join(tmpDir, "multi-sync")
+		_ = os.MkdirAll(repoDir, 0755)
+		_ = exec.Command("git", "init", "-b", "main", repoDir).Run()
+		_ = exec.Command("git", "-C", repoDir, "remote", "add", "origin", "https://github.com/org/multi-sync.git").Run()
+		_ = exec.Command("git", "-C", repoDir, "config", "user.name", "Test").Run()
+		_ = exec.Command("git", "-C", repoDir, "config", "user.email", "test@test.com").Run()
+
+		var updatedExistingPR, refreshedStalePR, autoMerged bool
+		var updatedBody string
+
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if len(args) > 0 && args[0] == "git" {
+				for _, a := range args {
+					if a == "push" || a == "checkout" || a == "set-url" {
+						return "", "", 0, nil
+					}
+				}
+				return defaultCommandRunner(args, dir, input)
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "create" {
+				return "", "a pull request for branch \"bot/repokit-sync\" into branch \"main\" already exists", 1, nil
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "view" {
+				return `{"number": 77}`, "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "merge" {
+				autoMerged = true
+				return "", "", 0, nil
+			}
+			if len(args) == 3 && args[0] == "gh" && args[1] == "api" && args[2] == "repos/org/multi-sync/pulls?state=open&per_page=20" {
+				return `[{"number": 11, "head": {"ref": "fix/ci", "sha": "cafebabe"}}]`, "", 0, nil
+			}
+			if len(args) == 3 && args[0] == "gh" && args[1] == "api" && args[2] == "repos/org/multi-sync/actions/runs?head_sha=cafebabe&per_page=10" {
+				return `{"workflow_runs": [{"conclusion": "startup_failure"}]}`, "", 0, nil
+			}
+			if len(args) >= 7 && args[0] == "gh" && args[1] == "api" && args[2] == "--method" && args[3] == "PATCH" {
+				if args[4] == "repos/org/multi-sync/pulls/77" {
+					updatedExistingPR = true
+					updatedBody = input
+				}
+				if args[4] == "repos/org/multi-sync/pulls/11" && input == `{"state":"open"}` {
+					refreshedStalePR = true
+				}
+				return "{}", "", 0, nil
+			}
+			return "{}", "", 0, nil
+		}
+
+		err := ConfigureWithOptions(ConfigureOptions{
+			Local:      true,
+			LocalDir:   tmpDir,
+			CreatePR:   true,
+			ReleaseRef: "v3.2.0",
+		})
+		if err != nil {
+			t.Fatalf("ConfigureWithOptions failed: %v", err)
+		}
+		if !updatedExistingPR {
+			t.Errorf("Expected existing sync PR #77 to be patched via UpdateExistingSyncPR")
+		}
+		if !strings.Contains(updatedBody, "3.2.0") {
+			t.Errorf("Expected patched PR body to contain ReleaseRef 3.2.0, got: %s", updatedBody)
+		}
+		if !refreshedStalePR {
+			t.Errorf("Expected stale open PR #11 to be refreshed via RefreshStaleOpenPRs")
+		}
+		if !autoMerged {
+			t.Errorf("Expected gh pr merge to still be called")
+		}
+	})
+}

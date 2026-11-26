@@ -2006,6 +2006,8 @@ func configureSingleRepository(opts ConfigureOptions) error {
 
 	fmt.Printf("%sConfiguring Repository:%s %s (%s)\n\n", Bold, Reset, slug, repoRoot)
 
+	isHub := strings.EqualFold(slug, DefaultGovernanceRepo) || strings.EqualFold(slug, "Cooper-Wallace/repokit") || strings.HasSuffix(strings.ToLower(slug), "/repokit")
+
 	if !opts.Offline {
 		_ = ApplyGitHubRepoSettings(slug)
 		_ = ApplySecurityAndAnalysis(slug)
@@ -2013,6 +2015,9 @@ func configureSingleRepository(opts ConfigureOptions) error {
 		_ = ApplyWorkflowPermissions(slug)
 		enableCodeScanning := ShouldEnableCodeScanningRule(slug, codeQLConfigured)
 		_ = ApplyBranchRuleset(slug, "~DEFAULT_BRANCH", nil, enableCodeScanning)
+		if !isHub && opts.CreatePR {
+			RefreshStaleOpenPRs(slug)
+		}
 	}
 	_ = ScaffoldLocalRepository(repoRoot, opts.Force)
 
@@ -2071,6 +2076,11 @@ func configureSingleRepository(opts ConfigureOptions) error {
 								LogSuccess("Created PR for %s: %s", slug, strings.TrimSpace(prOut))
 							} else {
 								LogInfo("PR for %s already exists.", slug)
+								if err := UpdateExistingSyncPR(slug, "bot/repokit-sync", prTitle, prBody); err != nil {
+									LogWarn("Failed to update existing PR metadata for %s: %v", slug, err)
+								} else {
+									LogSuccess("Updated existing PR title and body for %s", slug)
+								}
 							}
 							RunCmd([]string{"gh", "pr", "merge", "bot/repokit-sync", "--auto", "--squash", "--delete-branch", "--repo", slug}, repoRoot)
 							LogInfo("Enabled CI-gated auto-merge on bot/repokit-sync for %s", slug)
@@ -2294,6 +2304,10 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 			return nil, nil
 		}
 
+		if !opts.Offline && opts.CreatePR {
+			RefreshStaleOpenPRs(slug)
+		}
+
 		// Ephemeral clone for remote repos discovered without existing local clone
 		if localPath == "" && !opts.Offline {
 			tempDir := filepath.Join(os.TempDir(), "repokit-sync", repoName)
@@ -2403,6 +2417,17 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 								LogInfo("PR for %s already exists.", slug)
 							}
 						})
+						if prCode != 0 {
+							if err := UpdateExistingSyncPR(slug, "bot/repokit-sync", prTitle, prBody); err != nil {
+								SynchronizedLog(func() {
+									LogWarn("Failed to update existing PR metadata for %s: %v", slug, err)
+								})
+							} else {
+								SynchronizedLog(func() {
+									LogSuccess("Updated existing PR title and body for %s", slug)
+								})
+							}
+						}
 						RunCmd([]string{"gh", "pr", "merge", "bot/repokit-sync", "--auto", "--squash", "--delete-branch", "--repo", slug}, localPath)
 						SynchronizedLog(func() {
 							LogInfo("Enabled CI-gated auto-merge on bot/repokit-sync for %s", slug)
@@ -2515,6 +2540,116 @@ type ghStatusCheckEntry struct {
 	DetailsURL string `json:"detailsUrl,omitempty"`
 	TargetURL  string `json:"targetUrl,omitempty"`
 	URL        string `json:"url,omitempty"`
+}
+
+// UpdateExistingSyncPR updates the title and body of an existing pull request for branch.
+func UpdateExistingSyncPR(slug, branch, title, body string) error {
+	stdout, stderr, code, err := RunCmd([]string{"gh", "pr", "view", branch, "--repo", slug, "--json", "number"}, "")
+	if code != 0 || err != nil {
+		errDetail := strings.TrimSpace(stderr)
+		if errDetail == "" && err != nil {
+			errDetail = err.Error()
+		}
+		return fmt.Errorf("failed to resolve existing PR for %s (%s): %s", slug, branch, errDetail)
+	}
+
+	var pr struct {
+		Number int `json:"number"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &pr); err != nil || pr.Number <= 0 {
+		return fmt.Errorf("invalid PR number for %s (%s): %v", slug, branch, err)
+	}
+
+	payloadBytes, err := json.Marshal(map[string]string{
+		"title": title,
+		"body":  body,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal PR update payload: %w", err)
+	}
+
+	_, patchStderr, patchCode, patchErr := RunCmdWithInput([]string{
+		"gh", "api", "--method", "PATCH", fmt.Sprintf("repos/%s/pulls/%d", slug, pr.Number), "--input", "-",
+	}, "", string(payloadBytes))
+	if patchCode != 0 || patchErr != nil {
+		errDetail := strings.TrimSpace(patchStderr)
+		if errDetail == "" && patchErr != nil {
+			errDetail = patchErr.Error()
+		}
+		return fmt.Errorf("failed to patch PR #%d on %s (exit %d): %s", pr.Number, slug, patchCode, errDetail)
+	}
+	return nil
+}
+
+// RefreshStaleOpenPRs inspects open non-bot PRs on slug for CI runs ending in startup_failure
+// and cycles their open state (close then reopen) to trigger fresh check runs.
+func RefreshStaleOpenPRs(slug string) int {
+	if IsVaultOrExemptRepo(slug) {
+		return 0
+	}
+
+	stdout, _, code, err := RunCmd([]string{"gh", "api", fmt.Sprintf("repos/%s/pulls?state=open&per_page=20", slug)}, "")
+	if code != 0 || err != nil || strings.TrimSpace(stdout) == "" {
+		return 0
+	}
+
+	var pulls []struct {
+		Number int `json:"number"`
+		Head   struct {
+			Ref string `json:"ref"`
+			SHA string `json:"sha"`
+		} `json:"head"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &pulls); err != nil {
+		return 0
+	}
+
+	refreshed := 0
+	for _, pr := range pulls {
+		if pr.Number <= 0 || pr.Head.SHA == "" || strings.HasPrefix(pr.Head.Ref, "bot/") || pr.Head.Ref == "release-staging" || strings.HasPrefix(pr.Head.Ref, "release-") {
+			continue
+		}
+
+		runsOut, _, runsCode, runsErr := RunCmd([]string{"gh", "api", fmt.Sprintf("repos/%s/actions/runs?head_sha=%s&per_page=10", slug, pr.Head.SHA)}, "")
+		if runsCode != 0 || runsErr != nil || strings.TrimSpace(runsOut) == "" {
+			continue
+		}
+
+		var runsResp struct {
+			WorkflowRuns []struct {
+				Conclusion string `json:"conclusion"`
+			} `json:"workflow_runs"`
+		}
+		if err := json.Unmarshal([]byte(runsOut), &runsResp); err != nil {
+			continue
+		}
+
+		hasStartupFailure := false
+		for _, r := range runsResp.WorkflowRuns {
+			if strings.EqualFold(r.Conclusion, "startup_failure") {
+				hasStartupFailure = true
+				break
+			}
+		}
+		if !hasStartupFailure {
+			continue
+		}
+
+		LogInfo("[%s] Detected startup_failure on open PR #%d (%s); reopening to refresh CI checks...", slug, pr.Number, pr.Head.Ref)
+		prEndpoint := fmt.Sprintf("repos/%s/pulls/%d", slug, pr.Number)
+		_, _, closeCode, closeErr := RunCmdWithInput([]string{"gh", "api", "--method", "PATCH", prEndpoint, "--input", "-"}, "", `{"state":"closed"}`)
+		if closeCode != 0 || closeErr != nil {
+			continue
+		}
+
+		_, _, reopenCode, reopenErr := RunCmdWithInput([]string{"gh", "api", "--method", "PATCH", prEndpoint, "--input", "-"}, "", `{"state":"open"}`)
+		if reopenCode == 0 && reopenErr == nil {
+			refreshed++
+			LogSuccess("[%s] Refreshed stale CI checks on PR #%d.", slug, pr.Number)
+		}
+	}
+
+	return refreshed
 }
 
 // EnsureRepoLabels ensures the specified labels exist on the given repository using gh label create.
