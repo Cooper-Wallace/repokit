@@ -692,7 +692,7 @@ func TestApplyBranchRuleset(t *testing.T) {
 			return "[]", "", 0, nil
 		}
 
-		err := ApplyBranchRuleset("Cooper-Wallace/repokit", "~DEFAULT_BRANCH", nil)
+		err := ApplyBranchRuleset("Cooper-Wallace/repokit", "~DEFAULT_BRANCH", nil, true)
 		if err != nil {
 			t.Fatalf("ApplyBranchRuleset failed: %v", err)
 		}
@@ -769,7 +769,7 @@ func TestApplyBranchRuleset(t *testing.T) {
 			return "[]", "", 0, nil
 		}
 
-		err := ApplyBranchRuleset("Cooper-Wallace/my-repo", "~DEFAULT_BRANCH", nil)
+		err := ApplyBranchRuleset("Cooper-Wallace/my-repo", "~DEFAULT_BRANCH", nil, true)
 		if err != nil {
 			t.Fatalf("ApplyBranchRuleset failed: %v", err)
 		}
@@ -811,7 +811,7 @@ func TestApplyBranchRuleset(t *testing.T) {
 			return "[]", "", 0, nil
 		}
 
-		err := ApplyBranchRuleset("Cooper-Wallace/AgentVault", "~DEFAULT_BRANCH", nil)
+		err := ApplyBranchRuleset("Cooper-Wallace/AgentVault", "~DEFAULT_BRANCH", nil, true)
 		if err != nil {
 			t.Fatalf("ApplyBranchRuleset should succeed for exempt vault repo: %v", err)
 		}
@@ -842,7 +842,7 @@ func TestApplyBranchRuleset(t *testing.T) {
 			return "[]", "", 0, nil
 		}
 
-		err := ApplyBranchRuleset("Cooper-Wallace/private-repo", "~DEFAULT_BRANCH", nil)
+		err := ApplyBranchRuleset("Cooper-Wallace/private-repo", "~DEFAULT_BRANCH", nil, true)
 		if err != nil {
 			t.Fatalf("Expected fallback retry to succeed, got %v", err)
 		}
@@ -859,6 +859,36 @@ func TestApplyBranchRuleset(t *testing.T) {
 			rMap := r.(map[string]interface{})
 			if rMap["type"] == "code_scanning" {
 				t.Errorf("Fallback payload should not contain code_scanning rule: %v", rMap)
+			}
+		}
+	})
+
+	t.Run("omits_code_scanning_when_disabled", func(t *testing.T) {
+		var capturedInput string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if input != "" {
+				capturedInput = input
+			}
+			return "[]", "", 0, nil
+		}
+
+		err := ApplyBranchRuleset("Cooper-Wallace/private-repo", "~DEFAULT_BRANCH", nil, false)
+		if err != nil {
+			t.Fatalf("ApplyBranchRuleset failed: %v", err)
+		}
+
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(capturedInput), &payload); err != nil {
+			t.Fatalf("Failed to unmarshal ruleset payload: %v", err)
+		}
+		rules, ok := payload["rules"].([]interface{})
+		if !ok {
+			t.Fatalf("Expected rules in payload")
+		}
+		for _, r := range rules {
+			rMap := r.(map[string]interface{})
+			if rMap["type"] == "code_scanning" {
+				t.Errorf("Expected code_scanning rule to be omitted when enableCodeScanning=false, got %v", rMap)
 			}
 		}
 	})
@@ -1114,6 +1144,178 @@ func TestApplyCodeScanningDefaultSetup(t *testing.T) {
 		}
 		if callCount != 0 {
 			t.Errorf("Expected 0 API calls for exempt vault repo, got %d", callCount)
+		}
+	})
+
+	t.Run("consumer_already_configured_skips_patch", func(t *testing.T) {
+		patchCalled := false
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			joined := strings.Join(args, " ")
+			if strings.Contains(joined, "--method PATCH") {
+				patchCalled = true
+				return "{}", "", 0, nil
+			}
+			return `{"state":"configured","languages":["actions","python"]}`, "", 0, nil
+		}
+
+		configured, err := ApplyCodeScanningDefaultSetup("Cooper-Wallace/consumer-repo")
+		if err != nil {
+			t.Fatalf("Expected nil error, got %v", err)
+		}
+		if !configured {
+			t.Errorf("Expected configured=true, got false")
+		}
+		if patchCalled {
+			t.Errorf("Expected no PATCH call when consumer repo is already configured")
+		}
+	})
+
+	t.Run("hub_already_configured_exact_languages_skips_patch", func(t *testing.T) {
+		patchCalled := false
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			joined := strings.Join(args, " ")
+			if strings.Contains(joined, "--method PATCH") {
+				patchCalled = true
+				return "{}", "", 0, nil
+			}
+			return `{"state":"configured","languages":["actions","go"]}`, "", 0, nil
+		}
+
+		configured, err := ApplyCodeScanningDefaultSetup("Cooper-Wallace/repokit")
+		if err != nil {
+			t.Fatalf("Expected nil error, got %v", err)
+		}
+		if !configured {
+			t.Errorf("Expected configured=true, got false")
+		}
+		if patchCalled {
+			t.Errorf("Expected no PATCH call when hub repo is already configured with actions and go")
+		}
+	})
+
+	t.Run("hub_configured_extra_languages_patches", func(t *testing.T) {
+		var patchInput string
+		patchCalled := false
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			joined := strings.Join(args, " ")
+			if strings.Contains(joined, "--method PATCH") {
+				patchCalled = true
+				patchInput = input
+				return "{}", "", 0, nil
+			}
+			return `{"state":"configured","languages":["actions","go","python"]}`, "", 0, nil
+		}
+
+		configured, err := ApplyCodeScanningDefaultSetup("Cooper-Wallace/repokit")
+		if err != nil {
+			t.Fatalf("Expected nil error, got %v", err)
+		}
+		if !configured {
+			t.Errorf("Expected configured=true, got false")
+		}
+		if !patchCalled {
+			t.Fatalf("Expected PATCH call when hub repo has extra languages")
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(patchInput), &payload); err != nil {
+			t.Fatalf("Failed to parse patch payload: %v", err)
+		}
+		languages, ok := payload["languages"].([]interface{})
+		if !ok || len(languages) != 2 || languages[0] != "actions" || languages[1] != "go" {
+			t.Errorf("Expected languages ['actions', 'go'], got %v", payload["languages"])
+		}
+	})
+}
+
+func TestCodeScanningBaselineAndRuleGating(t *testing.T) {
+	oldRunner := CommandRunner
+	defer func() { CommandRunner = oldRunner }()
+
+	t.Run("baseline_present_enables_rule", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			if strings.Contains(strings.Join(args, " "), "code-scanning/analyses?per_page=1") {
+				return `[{"id":123,"tool":{"name":"CodeQL"}}]`, "", 0, nil
+			}
+			return "", "", 1, errors.New("unexpected call")
+		}
+
+		if !HasCodeScanningBaseline("Cooper-Wallace/consumer-repo") {
+			t.Errorf("Expected HasCodeScanningBaseline to return true for non-empty analyses")
+		}
+		if !ShouldEnableCodeScanningRule("Cooper-Wallace/consumer-repo", true) {
+			t.Errorf("Expected ShouldEnableCodeScanningRule to return true when baseline exists")
+		}
+	})
+
+	t.Run("codeql_not_configured_skips_analyses_api", func(t *testing.T) {
+		called := false
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			called = true
+			return `[{"id":123}]`, "", 0, nil
+		}
+
+		if ShouldEnableCodeScanningRule("Cooper-Wallace/private-repo", false) {
+			t.Errorf("Expected ShouldEnableCodeScanningRule to return false when codeQLConfigured=false")
+		}
+		if called {
+			t.Errorf("Expected no API call when codeQLConfigured=false")
+		}
+	})
+
+	t.Run("empty_analyses_defers_rule", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			return `[]`, "", 0, nil
+		}
+
+		if HasCodeScanningBaseline("Cooper-Wallace/new-public-repo") {
+			t.Errorf("Expected HasCodeScanningBaseline to return false for empty array")
+		}
+		if ShouldEnableCodeScanningRule("Cooper-Wallace/new-public-repo", true) {
+			t.Errorf("Expected ShouldEnableCodeScanningRule to return false when analyses array is empty")
+		}
+	})
+
+	t.Run("api_error_403_404_safe_degrade", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			return "", "HTTP 404: No analysis found", 1, errors.New("exit status 1")
+		}
+
+		if HasCodeScanningBaseline("Cooper-Wallace/new-public-repo") {
+			t.Errorf("Expected HasCodeScanningBaseline to return false on HTTP 404/403")
+		}
+		if ShouldEnableCodeScanningRule("Cooper-Wallace/new-public-repo", true) {
+			t.Errorf("Expected ShouldEnableCodeScanningRule to return false on API error")
+		}
+	})
+
+	t.Run("invalid_json_safe_degrade", func(t *testing.T) {
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			return `not-json`, "", 0, nil
+		}
+
+		if HasCodeScanningBaseline("Cooper-Wallace/new-public-repo") {
+			t.Errorf("Expected HasCodeScanningBaseline to return false on invalid JSON")
+		}
+		if ShouldEnableCodeScanningRule("Cooper-Wallace/new-public-repo", true) {
+			t.Errorf("Expected ShouldEnableCodeScanningRule to return false on invalid JSON")
+		}
+	})
+
+	t.Run("exempt_vault_repo_returns_false", func(t *testing.T) {
+		called := false
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			called = true
+			return `[{"id":1}]`, "", 0, nil
+		}
+
+		if HasCodeScanningBaseline("Cooper-Wallace/AgentVault") {
+			t.Errorf("Expected HasCodeScanningBaseline to return false for exempt vault repo")
+		}
+		if ShouldEnableCodeScanningRule("Cooper-Wallace/AgentVault", true) {
+			t.Errorf("Expected ShouldEnableCodeScanningRule to return false for exempt vault repo")
+		}
+		if called {
+			t.Errorf("Expected 0 API calls for exempt vault repo")
 		}
 	})
 }
@@ -2101,7 +2303,7 @@ func TestMoreBranches(t *testing.T) {
 			}
 			return "{}", "", 0, nil
 		}
-		err := ApplyBranchRuleset("org/repo", "~DEFAULT_BRANCH", []string{"check-1"})
+		err := ApplyBranchRuleset("org/repo", "~DEFAULT_BRANCH", []string{"check-1"}, true)
 		if err != nil {
 			t.Fatalf("ApplyBranchRuleset failed: %v", err)
 		}
@@ -2113,7 +2315,7 @@ func TestMoreBranches(t *testing.T) {
 		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
 			return "", "Ruleset failure", 1, fmt.Errorf("Ruleset failure")
 		}
-		errFail := ApplyBranchRuleset("org/repo", "~DEFAULT_BRANCH", nil)
+		errFail := ApplyBranchRuleset("org/repo", "~DEFAULT_BRANCH", nil, true)
 		if errFail == nil {
 			t.Errorf("Expected error when ruleset application fails")
 		}
@@ -2264,7 +2466,7 @@ func TestRulesetIDFormatting(t *testing.T) {
 			return "{}", "", 0, nil
 		}
 
-		err := ApplyBranchRuleset("org/repo", "~DEFAULT_BRANCH", nil)
+		err := ApplyBranchRuleset("org/repo", "~DEFAULT_BRANCH", nil, true)
 		if err != nil {
 			t.Fatalf("ApplyBranchRuleset failed: %v", err)
 		}
@@ -2894,7 +3096,7 @@ func TestConfigureWithOptions(t *testing.T) {
 			}
 			return "[]", "", 0, nil
 		}
-		err := ApplyBranchRuleset("Cooper-Wallace/Cooper-Wallace", "~DEFAULT_BRANCH", nil)
+		err := ApplyBranchRuleset("Cooper-Wallace/Cooper-Wallace", "~DEFAULT_BRANCH", nil, true)
 		if err != nil {
 			t.Fatalf("ApplyBranchRuleset failed: %v", err)
 		}
