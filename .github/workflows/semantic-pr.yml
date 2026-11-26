@@ -37,3 +37,46 @@ jobs:
             revert
             release
           requireScope: false
+
+      - name: Enforce Repokit Governance Ownership
+        if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.repository != 'Cooper-Wallace/repokit' && !endsWith(github.repository, '/repokit') && !startsWith(github.event.pull_request.head.ref, 'bot/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CHANGED_FILES=$(gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" --jq '.[].filename')
+          PROTECTED_PATHS=(
+            ".github/workflows/ci.yml"
+            ".github/workflows/release.yml"
+            ".github/workflows/sync.yml"
+            ".github/workflows/semantic-pr.yml"
+            ".github/pull_request_template.md"
+          )
+          VIOLATIONS=()
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            for protected in "${PROTECTED_PATHS[@]}"; do
+              if [ "$file" = "$protected" ]; then
+                VIOLATIONS+=("$file")
+              fi
+            done
+          done <<< "$CHANGED_FILES"
+
+          if [ ${#VIOLATIONS[@]} -gt 0 ]; then
+            echo "::error::Modification of repokit-controlled governance files is prohibited outside Cooper-Wallace/repokit propagation (bot/repokit-sync)."
+            echo "Violating governance-managed file(s):"
+            for v in "${VIOLATIONS[@]}"; do
+              echo "  - $v"
+            done
+            {
+              echo "### :no_entry: Repokit Governance Ownership Violation"
+              echo ""
+              echo "The following repokit-controlled governance file(s) may only be modified via \`Cooper-Wallace/repokit\` propagation (\`bot/repokit-sync\`):"
+              echo ""
+              for v in "${VIOLATIONS[@]}"; do
+                echo "- \`$v\`"
+              done
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "Confirmed: no repokit-controlled governance files were modified in PR #${{ github.event.pull_request.number }}."
