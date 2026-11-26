@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.0 (2026-11-26)
+
+### Features
+
+* **governance:** harden pull_request_target guard, CI isolation, and PR-only bypass (#40) (dfeef13)
+
+### Bug Fixes
+
+* **propagation:** refresh existing sync PR metadata and stale startup_failure PR checks (#43) (d2adc27)
+
 ## 1.5.1 (2026-11-26)
 
 ### Bug Fixes
