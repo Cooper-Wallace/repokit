@@ -1,0 +1,90 @@
+name: "Reusable Docker Release"
+
+on:
+  workflow_call:
+    inputs:
+      tag-name:
+        description: "Release tag name"
+        type: string
+        required: true
+      registry:
+        description: "Container registry host"
+        type: string
+        default: "ghcr.io"
+        required: false
+      dockerfile:
+        description: "Path to Dockerfile"
+        type: string
+        default: "Dockerfile"
+        required: false
+      context:
+        description: "Docker build context path"
+        type: string
+        default: "."
+        required: false
+      platforms:
+        description: "Target OCI platforms"
+        type: string
+        default: "linux/amd64"
+        required: false
+
+jobs:
+  release-docker:
+    name: "Build & Publish Container Image"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag-name }}
+
+      - name: Check Dockerfile presence
+        id: dockerfile
+        run: |
+          if [ -f "${{ inputs.dockerfile }}" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No Dockerfile found at \`${{ inputs.dockerfile }}\`; skipping container image build." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.dockerfile.outputs.exists == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        if: steps.dockerfile.outputs.exists == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        if: steps.dockerfile.outputs.exists == 'true'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ inputs.registry }}/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ inputs.tag-name }}
+            type=semver,pattern={{version}},value=${{ inputs.tag-name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag-name }}
+            type=sha,prefix=sha-
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        if: steps.dockerfile.outputs.exists == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
