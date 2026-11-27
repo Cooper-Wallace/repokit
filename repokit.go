@@ -197,6 +197,7 @@ permissions:
   pull-requests: write
   statuses: write
   actions: write
+  packages: write
 
 jobs:
   release-stage:
@@ -204,6 +205,14 @@ jobs:
     uses: {{governance_slug}}/.github/workflows/reusable-release-prep.yml@v1
     with:
       release-type: "simple"
+
+  container-release:
+    name: "Build & Publish Container Image"
+    needs: release-stage
+    if: ${{ needs.release-stage.outputs.releases_created == 'true' }}
+    uses: {{governance_slug}}/.github/workflows/reusable-release-docker.yml@v1
+    with:
+      tag-name: ${{ needs.release-stage.outputs.tag_name }}
 `
 
 	DefaultGitignore = `# OS Artifacts

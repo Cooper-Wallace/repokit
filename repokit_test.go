@@ -5256,6 +5256,15 @@ func TestTemplateWorkflowValidity(t *testing.T) {
 			if !strings.Contains(content, "pull-requests: write") {
 				t.Errorf("%s missing 'pull-requests: write'", path)
 			}
+			if !strings.Contains(content, "packages: write") {
+				t.Errorf("%s missing 'packages: write'", path)
+			}
+			if !strings.Contains(content, "reusable-release-docker.yml@v1") {
+				t.Errorf("%s missing 'reusable-release-docker.yml@v1'", path)
+			}
+			if !strings.Contains(content, "needs.release-stage.outputs.releases_created == 'true'") {
+				t.Errorf("%s missing release gate condition \"needs.release-stage.outputs.releases_created == 'true'\"", path)
+			}
 		})
 	}
 
@@ -5265,6 +5274,41 @@ func TestTemplateWorkflowValidity(t *testing.T) {
 		}
 		if !strings.Contains(GenericReleaseWorkflow, "actions: write") {
 			t.Errorf("GenericReleaseWorkflow missing 'actions: write'")
+		}
+		if !strings.Contains(GenericReleaseWorkflow, "packages: write") {
+			t.Errorf("GenericReleaseWorkflow missing 'packages: write'")
+		}
+		if !strings.Contains(GenericReleaseWorkflow, "reusable-release-docker.yml@v1") {
+			t.Errorf("GenericReleaseWorkflow missing 'reusable-release-docker.yml@v1'")
+		}
+		if !strings.Contains(GenericReleaseWorkflow, "needs.release-stage.outputs.releases_created == 'true'") {
+			t.Errorf("GenericReleaseWorkflow missing release gate condition \"needs.release-stage.outputs.releases_created == 'true'\"")
+		}
+	})
+
+	t.Run("reusable_release_docker_yml", func(t *testing.T) {
+		path := filepath.Join(".github", "workflows", "reusable-release-docker.yml")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("Failed to read %s: %v", path, err)
+		}
+		content := string(data)
+		required := []string{
+			"workflow_call",
+			"contents: read",
+			"packages: write",
+			"steps.dockerfile.outputs.exists == 'true'",
+			`if [ -f "${{ inputs.dockerfile }}" ]`,
+		}
+		for _, needle := range required {
+			if !strings.Contains(content, needle) {
+				t.Errorf("%s missing %s", path, needle)
+			}
+		}
+		for _, forbidden := range []string{"secrets: inherit", "contents: write"} {
+			if strings.Contains(content, forbidden) {
+				t.Errorf("%s must not contain %s", path, forbidden)
+			}
 		}
 	})
 }
