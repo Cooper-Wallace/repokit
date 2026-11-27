@@ -49,6 +49,7 @@ jobs:
             ".github/workflows/release.yml"
             ".github/workflows/sync.yml"
             ".github/workflows/semantic-pr.yml"
+            ".github/workflows/dependabot-automerge.yml"
             ".github/pull_request_template.md"
             ".gitleaksignore"
             ".gitleaks.toml"

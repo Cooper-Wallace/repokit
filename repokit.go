@@ -166,6 +166,25 @@ jobs:
     uses: Cooper-Wallace/repokit/.github/workflows/semantic-pr.yml@v1
 `
 
+	WorkflowDependabotAutoMerge = `name: "Dependabot Auto-Merge"
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  dependabot-automerge:
+    if: github.actor == 'dependabot[bot]'
+    uses: Cooper-Wallace/repokit/.github/workflows/reusable-dependabot-automerge.yml@v1
+`
+
 	GenericReleaseWorkflow = `name: Release
 
 on:
@@ -1147,31 +1166,52 @@ func InstallHooks(repoRoot string, allHooks bool) error {
 	return nil
 }
 
-func ScaffoldTemplates(repoRoot string, force bool) error {
-	prTemplatePath := filepath.Join(repoRoot, ".github", "pull_request_template.md")
-	if !fileExists(prTemplatePath) || force {
-		if err := os.MkdirAll(filepath.Dir(prTemplatePath), 0755); err != nil {
+func scaffoldTemplateFile(targetPath, content string, force bool, createdMsg, existsMsg string) error {
+	if !fileExists(targetPath) || force {
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 			return err
 		}
-		if err := WriteFileAtomic(prTemplatePath, []byte(PRTemplate), 0644); err != nil {
+		if err := WriteFileAtomic(targetPath, []byte(content), 0644); err != nil {
 			return err
 		}
-		LogSuccess("Scaffolded .github/pull_request_template.md")
+		LogSuccess(createdMsg)
 	} else {
-		LogInfo("PR template already exists (use --force to overwrite).")
+		LogInfo(existsMsg)
+	}
+	return nil
+}
+
+func ScaffoldTemplates(repoRoot string, force bool) error {
+	if err := scaffoldTemplateFile(
+		filepath.Join(repoRoot, ".github", "pull_request_template.md"),
+		PRTemplate,
+		force,
+		"Scaffolded .github/pull_request_template.md",
+		"PR template already exists (use --force to overwrite).",
+	); err != nil {
+		return err
 	}
 
-	workflowPath := filepath.Join(repoRoot, ".github", "workflows", "semantic-pr.yml")
-	if !fileExists(workflowPath) || force {
-		if err := os.MkdirAll(filepath.Dir(workflowPath), 0755); err != nil {
+	if err := scaffoldTemplateFile(
+		filepath.Join(repoRoot, ".github", "workflows", "semantic-pr.yml"),
+		WorkflowSemanticPR,
+		force,
+		"Scaffolded .github/workflows/semantic-pr.yml",
+		"Semantic PR workflow already exists (use --force to overwrite).",
+	); err != nil {
+		return err
+	}
+
+	if !IsGovernanceHub(repoRoot) {
+		if err := scaffoldTemplateFile(
+			filepath.Join(repoRoot, ".github", "workflows", "dependabot-automerge.yml"),
+			WorkflowDependabotAutoMerge,
+			force,
+			"Scaffolded .github/workflows/dependabot-automerge.yml",
+			"Dependabot auto-merge workflow already exists (use --force to overwrite).",
+		); err != nil {
 			return err
 		}
-		if err := WriteFileAtomic(workflowPath, []byte(WorkflowSemanticPR), 0644); err != nil {
-			return err
-		}
-		LogSuccess("Scaffolded .github/workflows/semantic-pr.yml")
-	} else {
-		LogInfo("Semantic PR workflow already exists (use --force to overwrite).")
 	}
 	return nil
 }

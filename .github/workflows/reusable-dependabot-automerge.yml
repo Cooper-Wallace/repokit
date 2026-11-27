@@ -1,0 +1,37 @@
+name: "Reusable Dependabot Auto-Merge"
+
+on:
+  workflow_call:
+
+jobs:
+  dependabot-auto-merge:
+    name: "Dependabot Auto-Merge (Patch/Minor)"
+    if: github.event_name == 'pull_request_target' && github.actor == 'dependabot[bot]' && github.repository != 'Cooper-Wallace/repokit' && !endsWith(github.repository, '/repokit')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable CI-gated auto-merge for patch/minor updates
+        if: steps.metadata.outputs.update-type == 'version-update:semver-patch' || steps.metadata.outputs.update-type == 'version-update:semver-minor'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        run: |
+          gh pr merge --auto --squash --delete-branch "$PR_URL"
+          echo "Enabled CI-gated squash auto-merge for Dependabot ${UPDATE_TYPE} update." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hold major updates for manual human review
+        if: steps.metadata.outputs.update-type != 'version-update:semver-patch' && steps.metadata.outputs.update-type != 'version-update:semver-minor'
+        env:
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        run: |
+          echo "Dependabot update (${UPDATE_TYPE}) requires manual human review and will not be auto-merged."
+          echo "Dependabot update (${UPDATE_TYPE}) requires manual human review and will not be auto-merged." >> "$GITHUB_STEP_SUMMARY"
