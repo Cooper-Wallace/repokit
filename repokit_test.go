@@ -587,7 +587,7 @@ func TestSemanticPRWorkflowPushGuard(t *testing.T) {
 	}
 }
 
-func TestArchetypeCIWorkflowHasSemanticPRPushGuard(t *testing.T) {
+func TestArchetypeCIWorkflowHasNoDuplicateValidatePR(t *testing.T) {
 	for _, arch := range []string{"bash", "python", "java", "typescript", "go"} {
 		templatePath := fmt.Sprintf("templates/%s/.github/workflows/ci.yml", arch)
 		contentBytes, err := TemplatesFS.ReadFile(templatePath)
@@ -595,8 +595,11 @@ func TestArchetypeCIWorkflowHasSemanticPRPushGuard(t *testing.T) {
 			t.Fatalf("Could not read template %s: %v", templatePath, err)
 		}
 		content := string(contentBytes)
-		if !strings.Contains(content, "if: github.event_name == 'pull_request'") {
-			t.Errorf("CI template for %s does not guard validate-pr with if: github.event_name == 'pull_request'", arch)
+		if strings.Contains(content, "validate-pr:") {
+			t.Errorf("CI template for %s must not contain duplicate validate-pr job", arch)
+		}
+		if strings.Contains(content, "semantic-pr.yml") {
+			t.Errorf("CI template for %s must not reference semantic-pr.yml (handled by standalone .github/workflows/semantic-pr.yml)", arch)
 		}
 	}
 }
@@ -3889,20 +3892,101 @@ func TestExecuteRelease(t *testing.T) {
 		if !foundCheckoutMain {
 			t.Errorf("Expected git checkout main back to target branch")
 		}
-		if !foundSemanticPR {
-			t.Errorf("Expected gh workflow run semantic-pr.yml")
+		if foundSemanticPR {
+			t.Errorf("Did not expect gh workflow run semantic-pr.yml")
 		}
 		if !foundTestWorkflow {
-			t.Errorf("Expected gh workflow run test.yml")
+			t.Errorf("Expected gh workflow run test.yml for hub repo")
 		}
-		foundStatusCert := 0
+		var postedContexts []string
 		for _, cmd := range executedCmds {
 			if len(cmd) >= 5 && cmd[0] == "gh" && cmd[1] == "api" && cmd[2] == "--method" && cmd[3] == "POST" && strings.Contains(cmd[4], "statuses") {
-				foundStatusCert++
+				for _, arg := range cmd {
+					if strings.HasPrefix(arg, "context=") {
+						postedContexts = append(postedContexts, strings.TrimPrefix(arg, "context="))
+					}
+				}
 			}
 		}
-		if foundStatusCert != 8 {
-			t.Errorf("Expected 8 pre-certified status check calls, got %d", foundStatusCert)
+		expectedHubContexts := []string{"Quality Gate / Verification", "Quality Gate / Title Validation"}
+		if len(postedContexts) != len(expectedHubContexts) {
+			t.Fatalf("Expected %d pre-certified status check calls for hub repo, got %d (%v)", len(expectedHubContexts), len(postedContexts), postedContexts)
+		}
+		for i, want := range expectedHubContexts {
+			if postedContexts[i] != want {
+				t.Errorf("Expected hub status context[%d]=%q, got %q", i, want, postedContexts[i])
+			}
+		}
+	})
+
+	t.Run("Mode B: Release Staging - Consumer Repo Contexts", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		var executedCmds [][]string
+		CommandRunner = func(args []string, dir string, input string) (string, string, int, error) {
+			executedCmds = append(executedCmds, args)
+			if len(args) >= 3 && args[0] == "git" && args[1] == "-C" && args[3] == "rev-parse" {
+				return tmpDir + "\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" && args[2] == "-1" {
+				return "feat(api): add endpoint\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "tag" && args[2] == "--list" {
+				return "v1.0.0\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "log" && strings.Contains(args[2], "..HEAD") {
+				return "1234567|feat(api): add endpoint\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "gh" && args[1] == "pr" && args[2] == "list" {
+				return "null\n", "", 0, nil
+			}
+			if len(args) >= 3 && args[0] == "git" && args[1] == "rev-parse" && args[2] == "HEAD" {
+				return "consumer123\n", "", 0, nil
+			}
+			if len(args) >= 5 && args[0] == "git" && args[1] == "-C" && args[3] == "remote" && args[4] == "get-url" {
+				return "https://github.com/org/consumer-app.git\n", "", 0, nil
+			}
+			if len(args) >= 5 && args[0] == "gh" && args[1] == "api" && args[2] == "--method" && args[3] == "POST" && strings.Contains(args[4], "statuses") {
+				return "{}", "", 0, nil
+			}
+			return "", "", 0, nil
+		}
+
+		res, err := ExecuteRelease(ReleaseOptions{
+			Path:   tmpDir,
+			DryRun: false,
+		})
+		if err != nil {
+			t.Fatalf("ExecuteRelease failed: %v", err)
+		}
+		if res.TagName != "v1.1.0" {
+			t.Errorf("Expected v1.1.0, got %s", res.TagName)
+		}
+
+		var postedContexts []string
+		for _, cmd := range executedCmds {
+			if len(cmd) >= 5 && cmd[0] == "gh" && cmd[1] == "workflow" && cmd[2] == "run" && cmd[3] == "test.yml" {
+				t.Errorf("Did not expect gh workflow run test.yml for consumer repo")
+			}
+			if len(cmd) >= 5 && cmd[0] == "gh" && cmd[1] == "workflow" && cmd[2] == "run" && cmd[3] == "semantic-pr.yml" {
+				t.Errorf("Did not expect gh workflow run semantic-pr.yml for consumer repo")
+			}
+			if len(cmd) >= 5 && cmd[0] == "gh" && cmd[1] == "api" && cmd[2] == "--method" && cmd[3] == "POST" && strings.Contains(cmd[4], "statuses") {
+				for _, arg := range cmd {
+					if strings.HasPrefix(arg, "context=") {
+						postedContexts = append(postedContexts, strings.TrimPrefix(arg, "context="))
+					}
+				}
+			}
+		}
+		expectedConsumerContexts := []string{"ci / Quality Gate / Verification", "validate-pr / Quality Gate / Title Validation"}
+		if len(postedContexts) != len(expectedConsumerContexts) {
+			t.Fatalf("Expected %d pre-certified status check calls for consumer repo, got %d (%v)", len(expectedConsumerContexts), len(postedContexts), postedContexts)
+		}
+		for i, want := range expectedConsumerContexts {
+			if postedContexts[i] != want {
+				t.Errorf("Expected consumer status context[%d]=%q, got %q", i, want, postedContexts[i])
+			}
 		}
 	})
 
@@ -3953,7 +4037,7 @@ func TestExecuteRelease(t *testing.T) {
 		}
 
 		foundPrEdit := false
-		foundStatusCertExisting := 0
+		var postedContextsExisting []string
 		for _, cmd := range executedCmds {
 			if len(cmd) >= 4 && cmd[0] == "gh" && cmd[1] == "pr" && cmd[2] == "edit" && cmd[3] == "55" {
 				foundPrEdit = true
@@ -3966,14 +4050,18 @@ func TestExecuteRelease(t *testing.T) {
 				}
 			}
 			if len(cmd) >= 5 && cmd[0] == "gh" && cmd[1] == "api" && cmd[2] == "--method" && cmd[3] == "POST" && strings.Contains(cmd[4], "statuses") {
-				foundStatusCertExisting++
+				for _, arg := range cmd {
+					if strings.HasPrefix(arg, "context=") {
+						postedContextsExisting = append(postedContextsExisting, strings.TrimPrefix(arg, "context="))
+					}
+				}
 			}
 		}
 		if !foundPrEdit {
 			t.Errorf("Expected gh pr edit 55")
 		}
-		if foundStatusCertExisting != 8 {
-			t.Errorf("Expected 8 pre-certified status check calls, got %d", foundStatusCertExisting)
+		if len(postedContextsExisting) != 2 {
+			t.Errorf("Expected 2 pre-certified status check calls, got %d (%v)", len(postedContextsExisting), postedContextsExisting)
 		}
 	})
 
@@ -5366,10 +5454,17 @@ func TestArchetypeWorkflowPermissionsAndBotPRHydration(t *testing.T) {
 			"contents: write",
 			"pull-requests: write",
 			"statuses: write",
+			`"ci / Quality Gate / Verification"`,
+			`"validate-pr / Quality Gate / Title Validation"`,
 		}
 		for _, needle := range required {
 			if !strings.Contains(content, needle) {
 				t.Errorf("%s missing %s", path, needle)
+			}
+		}
+		for _, forbidden := range []string{`"Quality Gate / Verification"`, `"Quality Gate / Title Validation"`} {
+			if strings.Contains(content, forbidden) {
+				t.Errorf("%s must not hydrate unused hub context %s on bot PRs", path, forbidden)
 			}
 		}
 	})

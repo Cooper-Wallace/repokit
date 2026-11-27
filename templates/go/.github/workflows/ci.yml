@@ -11,10 +11,6 @@ permissions:
   pull-requests: read
 
 jobs:
-  validate-pr:
-    if: github.event_name == 'pull_request'
-    uses: {{governance_slug}}/.github/workflows/semantic-pr.yml@v1
-
   ci:
     uses: {{governance_slug}}/.github/workflows/reusable-go.yml@v1
     secrets: inherit
