@@ -5395,6 +5395,7 @@ func TestArchetypeWorkflowPermissionsAndBotPRHydration(t *testing.T) {
 			".github/workflows/release.yml",
 			".github/workflows/sync.yml",
 			".github/workflows/semantic-pr.yml",
+			".github/workflows/dependabot-automerge.yml",
 			".github/pull_request_template.md",
 			".gitleaksignore",
 			".gitleaks.toml",
@@ -5783,6 +5784,120 @@ func TestConfigureSyncPRUpdateAndStaleRefreshWiring(t *testing.T) {
 		}
 		if !autoMerged {
 			t.Errorf("Expected gh pr merge to still be called")
+		}
+	})
+}
+
+func TestDependabotAutoMergeWorkflow(t *testing.T) {
+	t.Run("reusable_workflow_contract_and_security", func(t *testing.T) {
+		path := filepath.Join(".github", "workflows", "reusable-dependabot-automerge.yml")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("Failed to read %s: %v", path, err)
+		}
+		content := string(data)
+
+		if strings.Contains(content, "actions/checkout") {
+			t.Errorf("%s must NOT run actions/checkout under pull_request_target", path)
+		}
+
+		required := []string{
+			"workflow_call:",
+			"dependabot-auto-merge:",
+			"github.event_name == 'pull_request_target'",
+			"github.actor == 'dependabot[bot]'",
+			"github.repository != 'Cooper-Wallace/repokit'",
+			"!endsWith(github.repository, '/repokit')",
+			"contents: write",
+			"pull-requests: write",
+			"uses: dependabot/fetch-metadata@v2",
+			"steps.metadata.outputs.update-type == 'version-update:semver-patch' || steps.metadata.outputs.update-type == 'version-update:semver-minor'",
+			"steps.metadata.outputs.update-type != 'version-update:semver-patch' && steps.metadata.outputs.update-type != 'version-update:semver-minor'",
+			`gh pr merge --auto --squash --delete-branch "$PR_URL"`,
+		}
+		for _, needle := range required {
+			if !strings.Contains(content, needle) {
+				t.Errorf("%s missing required string: %s", path, needle)
+			}
+		}
+	})
+
+	t.Run("caller_template_constant", func(t *testing.T) {
+		for _, needle := range []string{
+			"pull_request_target:",
+			"contents: write",
+			"pull-requests: write",
+			"if: github.actor == 'dependabot[bot]'",
+			"uses: Cooper-Wallace/repokit/.github/workflows/reusable-dependabot-automerge.yml@v1",
+		} {
+			if !strings.Contains(WorkflowDependabotAutoMerge, needle) {
+				t.Errorf("WorkflowDependabotAutoMerge constant missing %s", needle)
+			}
+		}
+	})
+
+	t.Run("scaffold_templates_consumer_vs_hub", func(t *testing.T) {
+		consumerDir := t.TempDir()
+		if err := ScaffoldTemplates(consumerDir, false); err != nil {
+			t.Fatalf("ScaffoldTemplates failed for consumer repo: %v", err)
+		}
+		consumerWorkflow := filepath.Join(consumerDir, ".github", "workflows", "dependabot-automerge.yml")
+		if !fileExists(consumerWorkflow) {
+			t.Fatalf("Expected %s to be scaffolded in consumer repo", consumerWorkflow)
+		}
+		got, err := os.ReadFile(consumerWorkflow)
+		if err != nil {
+			t.Fatalf("Failed to read scaffolded workflow: %v", err)
+		}
+		if string(got) != WorkflowDependabotAutoMerge {
+			t.Errorf("Scaffolded workflow does not match WorkflowDependabotAutoMerge")
+		}
+
+		// Respect !force when file already exists with custom content, and overwrite when force=true.
+		custom := []byte("custom-content\n")
+		if err := os.WriteFile(consumerWorkflow, custom, 0644); err != nil {
+			t.Fatalf("Failed to write custom workflow: %v", err)
+		}
+		if err := ScaffoldTemplates(consumerDir, false); err != nil {
+			t.Fatalf("ScaffoldTemplates(force=false) failed: %v", err)
+		}
+		afterNoForce, _ := os.ReadFile(consumerWorkflow)
+		if string(afterNoForce) != string(custom) {
+			t.Errorf("Expected ScaffoldTemplates(force=false) to preserve existing file")
+		}
+		if err := ScaffoldTemplates(consumerDir, true); err != nil {
+			t.Fatalf("ScaffoldTemplates(force=true) failed: %v", err)
+		}
+		afterForce, _ := os.ReadFile(consumerWorkflow)
+		if string(afterForce) != WorkflowDependabotAutoMerge {
+			t.Errorf("Expected ScaffoldTemplates(force=true) to overwrite with WorkflowDependabotAutoMerge")
+		}
+
+		// Governance hub must NOT scaffold dependabot-automerge.yml.
+		hubDir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(hubDir, ".github", "workflows"), 0755)
+		_ = os.WriteFile(filepath.Join(hubDir, ".github", "workflows", "reusable-go.yml"), []byte("name: Reusable Go\n"), 0644)
+		_ = os.WriteFile(filepath.Join(hubDir, "repokit.go"), []byte("package repokit\n"), 0644)
+		if !IsGovernanceHub(hubDir) {
+			t.Fatalf("Expected hubDir to be detected as governance hub")
+		}
+		if err := ScaffoldTemplates(hubDir, true); err != nil {
+			t.Fatalf("ScaffoldTemplates failed for governance hub: %v", err)
+		}
+		hubWorkflow := filepath.Join(hubDir, ".github", "workflows", "dependabot-automerge.yml")
+		if fileExists(hubWorkflow) {
+			t.Errorf("Governance hub must not scaffold %s", hubWorkflow)
+		}
+	})
+
+	t.Run("semantic_pr_protects_dependabot_automerge", func(t *testing.T) {
+		path := filepath.Join(".github", "workflows", "semantic-pr.yml")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("Failed to read %s: %v", path, err)
+		}
+		if !strings.Contains(string(data), `".github/workflows/dependabot-automerge.yml"`) {
+			t.Errorf("%s missing .github/workflows/dependabot-automerge.yml in PROTECTED_PATHS", path)
 		}
 	})
 }
