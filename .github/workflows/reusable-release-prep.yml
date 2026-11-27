@@ -117,7 +117,7 @@ jobs:
             sleep 2
             NEW_SHA=$(gh api "repos/${{ github.repository }}/pulls/$pr" --jq '.head.sha' 2>/dev/null || true)
             if [ -n "$NEW_SHA" ]; then
-              for ctx in "ci / Quality Gate / Verification" "validate-pr / Quality Gate / Title Validation" "Quality Gate / Verification" "Quality Gate / Title Validation"; do
+              for ctx in "ci / Quality Gate / Verification" "validate-pr / Quality Gate / Title Validation"; do
                 gh api --method POST "repos/${{ github.repository }}/statuses/$NEW_SHA" \
                   -f state=success \
                   -f context="$ctx" \

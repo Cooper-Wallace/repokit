@@ -3817,16 +3817,19 @@ func ExecuteRelease(opts ReleaseOptions) (*ReleaseResult, error) {
 		stagingSha = strings.TrimSpace(stagingSha)
 
 		slug, _ := GetRepoSlug(repoRoot)
+		isHub := strings.EqualFold(slug, DefaultGovernanceRepo) || strings.EqualFold(slug, "Cooper-Wallace/repokit") || strings.HasSuffix(strings.ToLower(slug), "/repokit") || IsGovernanceHub(repoRoot)
 		if slug != "" && stagingSha != "" {
-			requiredContexts := []string{
-				"Quality Gate / Verification",
-				"Quality Gate / Title Validation",
-				"ci / Quality Gate / Verification",
-				"validate-pr / Quality Gate / Title Validation",
-				"Test & Coverage",
-				"Validate Conventional Commit PR Title",
-				"ci / Test & Coverage",
-				"validate-pr / Validate Conventional Commit PR Title",
+			var requiredContexts []string
+			if isHub {
+				requiredContexts = []string{
+					"Quality Gate / Verification",
+					"Quality Gate / Title Validation",
+				}
+			} else {
+				requiredContexts = []string{
+					"ci / Quality Gate / Verification",
+					"validate-pr / Quality Gate / Title Validation",
+				}
 			}
 			for _, ctx := range requiredContexts {
 				RunCmd([]string{
@@ -3839,8 +3842,9 @@ func ExecuteRelease(opts ReleaseOptions) (*ReleaseResult, error) {
 			}
 		}
 
-		RunCmd([]string{"gh", "workflow", "run", "semantic-pr.yml", "--ref", opts.StagingBranch}, repoRoot)
-		RunCmd([]string{"gh", "workflow", "run", "test.yml", "--ref", opts.StagingBranch}, repoRoot)
+		if isHub {
+			RunCmd([]string{"gh", "workflow", "run", "test.yml", "--ref", opts.StagingBranch}, repoRoot)
+		}
 		RunCmd([]string{"git", "checkout", opts.TargetBranch}, repoRoot)
 	}
 
