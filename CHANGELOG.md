@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.7.0 (2026-11-27)
+
+### Features
+
+* **workflows:** add CI-gated Dependabot auto-merge for patch and minor updates (#46) (f75f0b8)
+
+### Performance & Refactoring
+
+* **ci:** deduplicate release, bot, and consumer PR status checks (#48) (6aad10a)
+
 ## 1.6.0 (2026-11-26)
 
 ### Features
