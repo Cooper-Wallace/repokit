@@ -2045,6 +2045,9 @@ func configureSingleRepository(opts ConfigureOptions) error {
 			LogInfo("[DRY RUN] Would apply branch protection ruleset to %s", slug)
 		}
 		LogInfo("[DRY RUN] Would configure local repository at %s (force=%v)", repoRoot, opts.Force)
+		if dryReconcile, err := ReconcileConsumerWorkflows(repoRoot, slug, true); err == nil {
+			logWorkflowReconcileFindings(slug, dryReconcile)
+		}
 		if opts.DirectCommit {
 			LogInfo("[DRY RUN] Would check git status and commit directly to main at %s if changes exist", repoRoot)
 		} else if opts.CreatePR {
@@ -2069,6 +2072,25 @@ func configureSingleRepository(opts ConfigureOptions) error {
 		}
 	}
 	_ = ScaffoldLocalRepository(repoRoot, opts.Force)
+	reconcileRes, reconcileErr := ReconcileConsumerWorkflows(repoRoot, slug, opts.DryRun)
+	if reconcileErr != nil {
+		LogWarn("[%s] Failed to reconcile legacy workflows: %v", slug, reconcileErr)
+	} else {
+		logWorkflowReconcileFindings(slug, reconcileRes)
+	}
+
+	var migrationIssueEnsured bool
+	ensureMigrationIssue := func(prRef string) {
+		if migrationIssueEnsured || opts.Offline || opts.DryRun || reconcileRes == nil || len(reconcileRes.Findings) == 0 {
+			return
+		}
+		migrationIssueEnsured = true
+		if issueNum, err := EnsureWorkflowMigrationIssue(slug, reconcileRes.Findings, prRef); err != nil {
+			LogWarn("[%s] Failed to ensure workflow migration issue: %v", slug, err)
+		} else if issueNum > 0 {
+			LogInfo("[%s] Workflow migration issue #%d is open", slug, issueNum)
+		}
+	}
 
 	if opts.DirectCommit {
 		statusOut, _, _, _ := RunCmd([]string{"git", "-C", repoRoot, "status", "--porcelain"}, "")
@@ -2121,8 +2143,10 @@ func configureSingleRepository(opts ConfigureOptions) error {
 							"--body", prBody,
 						}, repoRoot)
 						if prCode == 0 || strings.Contains(strings.ToLower(prErr), "a pull request") || strings.Contains(strings.ToLower(prOut), "a pull request") || strings.Contains(strings.ToLower(prErr), "already exists") {
+							prRef := ""
 							if prCode == 0 {
-								LogSuccess("Created PR for %s: %s", slug, strings.TrimSpace(prOut))
+								prRef = strings.TrimSpace(prOut)
+								LogSuccess("Created PR for %s: %s", slug, prRef)
 							} else {
 								LogInfo("PR for %s already exists.", slug)
 								if err := UpdateExistingSyncPR(slug, "bot/repokit-sync", prTitle, prBody); err != nil {
@@ -2131,6 +2155,7 @@ func configureSingleRepository(opts ConfigureOptions) error {
 									LogSuccess("Updated existing PR title and body for %s", slug)
 								}
 							}
+							ensureMigrationIssue(prRef)
 							RunCmd([]string{"gh", "pr", "merge", "bot/repokit-sync", "--auto", "--squash", "--delete-branch", "--repo", slug}, repoRoot)
 							LogInfo("Enabled CI-gated auto-merge on bot/repokit-sync for %s", slug)
 							if opts.WaitForMerge {
@@ -2157,6 +2182,8 @@ func configureSingleRepository(opts ConfigureOptions) error {
 			LogInfo("No local modifications detected in %s; skipping PR creation.", repoRoot)
 		}
 	}
+
+	ensureMigrationIssue("")
 
 	fmt.Println()
 	LogSuccess("Repository configuration complete!")
@@ -2313,6 +2340,9 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 				}
 				if localPath != "" {
 					LogInfo("[DRY RUN] Would configure local repository at %s (force=%v)", localPath, opts.Force)
+					if dryReconcile, err := ReconcileConsumerWorkflows(localPath, slug, true); err == nil {
+						logWorkflowReconcileFindings(slug, dryReconcile)
+					}
 					if opts.DirectCommit {
 						LogInfo("[DRY RUN] Would check git status and commit directly to main at %s if changes exist", localPath)
 					} else if opts.CreatePR {
@@ -2394,6 +2424,34 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 				})
 			}
 
+			var reconcileRes *WorkflowReconcileResult
+			var reconcileErr error
+			SynchronizedLog(func() {
+				reconcileRes, reconcileErr = ReconcileConsumerWorkflows(localPath, slug, opts.DryRun)
+				if reconcileErr != nil {
+					LogWarn("[%s] Failed to reconcile legacy workflows: %v", slug, reconcileErr)
+				} else {
+					logWorkflowReconcileFindings(slug, reconcileRes)
+				}
+			})
+
+			var migrationIssueEnsured bool
+			ensureMigrationIssue := func(prRef string) {
+				if migrationIssueEnsured || opts.Offline || opts.DryRun || reconcileRes == nil || len(reconcileRes.Findings) == 0 {
+					return
+				}
+				migrationIssueEnsured = true
+				if issueNum, err := EnsureWorkflowMigrationIssue(slug, reconcileRes.Findings, prRef); err != nil {
+					SynchronizedLog(func() {
+						LogWarn("[%s] Failed to ensure workflow migration issue: %v", slug, err)
+					})
+				} else if issueNum > 0 {
+					SynchronizedLog(func() {
+						LogInfo("[%s] Workflow migration issue #%d is open", slug, issueNum)
+					})
+				}
+			}
+
 			statusOut, _, _, _ := RunCmd([]string{"git", "-C", localPath, "status", "--porcelain"}, "")
 			if strings.TrimSpace(statusOut) != "" {
 				if opts.DirectCommit {
@@ -2459,9 +2517,11 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 						"--body", prBody,
 					}, localPath)
 					if prCode == 0 || strings.Contains(strings.ToLower(prErr), "a pull request") || strings.Contains(strings.ToLower(prOut), "a pull request") || strings.Contains(strings.ToLower(prErr), "already exists") {
+						prRef := ""
 						SynchronizedLog(func() {
 							if prCode == 0 {
-								LogSuccess("Created PR for %s: %s", slug, strings.TrimSpace(prOut))
+								prRef = strings.TrimSpace(prOut)
+								LogSuccess("Created PR for %s: %s", slug, prRef)
 							} else {
 								LogInfo("PR for %s already exists.", slug)
 							}
@@ -2477,6 +2537,7 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 								})
 							}
 						}
+						ensureMigrationIssue(prRef)
 						RunCmd([]string{"gh", "pr", "merge", "bot/repokit-sync", "--auto", "--squash", "--delete-branch", "--repo", slug}, localPath)
 						SynchronizedLog(func() {
 							LogInfo("Enabled CI-gated auto-merge on bot/repokit-sync for %s", slug)
@@ -2500,6 +2561,7 @@ func configureMultipleRepositories(opts ConfigureOptions) error {
 					}
 				})
 			}
+			ensureMigrationIssue("")
 		}
 		return nil, nil
 	}
